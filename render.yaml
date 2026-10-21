@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: sonic-nox
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn nox.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips="*" --no-server-header --workers 1
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: BOT_TOKEN
+        sync: false
+      - key: BOT_USERNAME
+        value: SonicNoxBot
+      - key: MINIAPP_SHORT
+        value: room
+      - key: PUBLIC_URL
+        sync: false
+      - key: PROXY_SECRET
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: OWNER_IDS
+        sync: false
+      - key: MONGO_URI
+        sync: false
