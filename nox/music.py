@@ -118,12 +118,11 @@ async def search(q):
         return [dict(x) for x in hit]
     
     try:
-        # Direct yt-dlp search for robust results
         proc = await asyncio.create_subprocess_exec(
             "yt-dlp", "--print", "%(id)s\t%(title)s\t%(channel)s\t%(duration)s", f"ytsearch5:{q}",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=25.0)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=40.0)
         out = []
         if stdout:
             for line in stdout.decode().strip().split('\n'):
@@ -174,7 +173,7 @@ async def resolve(track):
             "yt-dlp", "-g", "-f", "ba[ext=m4a]/ba", search_query,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=25.0)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=40.0)
         
         if proc.returncode == 0 and stdout:
             url = stdout.decode().strip().split('\n')[0]
