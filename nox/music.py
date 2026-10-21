@@ -5,22 +5,18 @@ import secrets
 import time
 from urllib.parse import quote
 
-import httpx
-
 from . import config
 from .security import clean_text, safe_https_url
 
 class TTL:
     def __init__(self, ttl, cap):
         self.ttl, self.cap, self.d = ttl, cap, {}
-
     def get(self, k):
         v = self.d.get(k)
         if v and v[0] > time.monotonic():
             return v[1]
         self.d.pop(k, None)
         return None
-
     def put(self, k, v):
         if len(self.d) >= self.cap:
             now = time.monotonic()
@@ -28,18 +24,14 @@ class TTL:
             if len(self.d) >= self.cap:
                 self.d.clear()
         self.d[k] = (time.monotonic() + self.ttl, v)
-
     def clear(self):
         self.d.clear()
 
 class Breaker:
-    """4 failures within 60 s -> that source is skipped for 60 s."""
     def __init__(self):
         self.fails, self.open_until = {}, {}
-
     def ok(self, name):
         return time.monotonic() >= self.open_until.get(name, 0)
-
     def fail(self, name):
         now = time.monotonic()
         f = [t for t in self.fails.get(name, []) if now - t < 60] + [now]
@@ -47,7 +39,6 @@ class Breaker:
         if len(f) >= 4:
             self.open_until[name] = now + 60
             self.fails[name] = []
-
     def good(self, name):
         self.fails.pop(name, None)
 
@@ -63,6 +54,7 @@ _YT_PATHS = ["/yt_music_audio/yt_music_audio", "/yt_music_audio"]
 def client():
     global _client
     if _client is None:
+        import httpx
         _client = httpx.AsyncClient(
             timeout=httpx.Timeout(8.0, connect=4.0), follow_redirects=False,
             headers={"User-Agent": "SonicNox/1.0", "x-api-key": config.CURIOUS_API_KEY}, limits=httpx.Limits(max_connections=30))
@@ -98,11 +90,6 @@ def _first(d, keys):
             return v
     return None
 
-def _name(v):
-    if isinstance(v, dict):
-        v = _first(v, ("name", "username", "title"))
-    return v if isinstance(v, str) else ""
-
 def _secs(v):
     try:
         if isinstance(v, str):
@@ -121,42 +108,6 @@ def _secs(v):
     except Exception:
         return None
 
-def pick_list(js, depth=0):
-    if isinstance(js, list):
-        return [x for x in js if isinstance(x, dict)]
-    if isinstance(js, dict) and depth < 2:
-        for k in ("data", "results", "tracks", "collection", "items", "result"):
-            v = js.get(k)
-            if isinstance(v, (list, dict)):
-                out = pick_list(v, depth + 1)
-                if out:
-                    return out
-    return []
-
-def normalize(item, src):
-    if not isinstance(item, dict):
-        return None
-    title = clean_text(str(_first(item, ("title", "trackName", "name", "track_name", "track")) or ""), 120)
-    if not title:
-        return None
-    artist = _name(item.get("artist")) or _name(item.get("user")) or str(
-        _first(item, ("artistName", "artist_name", "author", "uploader")) or "")
-    album = item.get("album") if isinstance(item.get("album"), dict) else {}
-    cover = _first(album, ("cover_big", "cover_xl", "cover_medium", "cover")) or _first(
-        item, ("artworkUrl100", "artwork_url", "cover", "thumbnail", "image"))
-    if isinstance(cover, str):
-        cover = cover.replace("100x100bb", "600x600bb")
-    return {
-        "id": f"{src}:{item.get('id') or item.get('trackId') or ''}",
-        "src": src,
-        "title": title,
-        "artist": clean_text(artist, 80) or "Unknown artist",
-        "dur": _secs(_first(item, ("duration", "trackTimeMillis", "duration_ms", "full_duration"))),
-        "cover": safe_https_url(cover),
-        "preview": safe_https_url(_first(item, ("preview", "previewUrl", "preview_url"))),
-        "stream": safe_https_url(_first(item, ("stream_url", "streamUrl", "audioUrl", "media_url"))) if src == "soundcloud" else None,
-    }
-
 async def search(q):
     q = clean_text(q, 80)
     if len(q) < 2:
@@ -166,13 +117,13 @@ async def search(q):
     if hit is not None:
         return [dict(x) for x in hit]
     
-    # Use yt-dlp directly for search
     try:
+        # Direct yt-dlp search for robust results
         proc = await asyncio.create_subprocess_exec(
             "yt-dlp", "--print", "%(id)s\t%(title)s\t%(channel)s\t%(duration)s", f"ytsearch5:{q}",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=25.0)
         out = []
         if stdout:
             for line in stdout.decode().strip().split('\n'):
@@ -215,8 +166,7 @@ async def resolve(track):
     if hit:
         return hit
     
-    # Use direct video ID if available, else search
-    vid_id = track.get("id", "").replace("yt:", "")
+    vid_id = str(track.get("id", "")).replace("yt:", "")
     search_query = f"https://www.youtube.com/watch?v={vid_id}" if vid_id else f'{track["artist"]} - {track["title"]} audio'
     
     try:
@@ -224,7 +174,7 @@ async def resolve(track):
             "yt-dlp", "-g", "-f", "ba[ext=m4a]/ba", search_query,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=25.0)
         
         if proc.returncode == 0 and stdout:
             url = stdout.decode().strip().split('\n')[0]
