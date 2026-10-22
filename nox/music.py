@@ -7,23 +7,18 @@ import secrets
 import time
 from urllib.parse import quote
 
-import httpx
-
 from . import config
 from .security import clean_text, safe_https_url
-
 
 class TTL:
     def __init__(self, ttl, cap):
         self.ttl, self.cap, self.d = ttl, cap, {}
-
     def get(self, k):
         v = self.d.get(k)
         if v and v[0] > time.monotonic():
             return v[1]
         self.d.pop(k, None)
         return None
-
     def put(self, k, v):
         if len(self.d) >= self.cap:
             now = time.monotonic()
@@ -31,20 +26,16 @@ class TTL:
             if len(self.d) >= self.cap:
                 self.d.clear()
         self.d[k] = (time.monotonic() + self.ttl, v)
-
     def clear(self):
         self.d.clear()
-
 
 class Breaker:
     """4 failures within 30 s -> that endpoint is skipped for 30 s."""
 
     def __init__(self):
         self.fails, self.open_until = {}, {}
-
     def ok(self, name):
         return time.monotonic() >= self.open_until.get(name, 0)
-
     def fail(self, name):
         now = time.monotonic()
         f = [t for t in self.fails.get(name, []) if now - t < 30] + [now]
@@ -52,10 +43,8 @@ class Breaker:
         if len(f) >= 4:
             self.open_until[name] = now + 30
             self.fails[name] = []
-
     def good(self, name):
         self.fails.pop(name, None)
-
 
 BREAKER = Breaker()
 _SEARCH = TTL(600, 800)
@@ -69,17 +58,16 @@ _client = None
 def client():
     global _client
     if _client is None:
+        import httpx
         _client = httpx.AsyncClient(
             timeout=httpx.Timeout(7.0, connect=3.5), follow_redirects=True,
             headers={"User-Agent": "Mozilla/5.0 SonicNox/2.0", "Accept": "application/json"},
             limits=httpx.Limits(max_connections=40, max_keepalive_connections=20, keepalive_expiry=60))
     return _client
 
-
 async def close():
     if _client is not None:
         await _client.aclose()
-
 
 def clear_caches():
     for c in (_SEARCH, _RESULTS, _SONG, _LYR):
@@ -264,7 +252,6 @@ def stash(user_id, items):
         pub.append({"token": tok, "title": t["title"], "artist": t["artist"], "dur": t["dur"], "cover": t["cover"]})
     return pub
 
-
 def take(token, user_id):
     v = _RESULTS.get(token) if isinstance(token, str) and len(token) <= 16 else None
     if not v or v[0] != user_id:
@@ -325,7 +312,6 @@ async def lyrics(artist_name, title):
     txt = txt.replace("\r", "").strip()[:6000] if isinstance(txt, str) else ""
     _LYR.put(key, txt)
     return txt
-
 
 async def health():
     async def one(n, path, params, base=None):
