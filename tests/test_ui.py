@@ -39,10 +39,14 @@ class UiTests(unittest.TestCase):
         self.assertTrue(all(len(r) <= 3 for r in rows))
 
     def test_texts(self):
-        self.assertIn(ui.sc("starting now"), ui.added_text(trk(1), "start", "Sam"))
+        self.assertIn(ui.tc("starting now"), ui.added_text(trk(1), "start", "Sam"))
         self.assertLessEqual(len(ui.WELCOME.format(name="N" * 30)), 1024)
         self.assertIn("/invite", ui.HELP)
-        self.assertIn("ǫᴜᴇᴜᴇ", ui.queue_text(room(cur=trk(1), queue=[trk(2)])))
+        self.assertEqual(ui.tc("welcome to sonic nox"), "Wᴇʟᴄᴏᴍᴇ Tᴏ Sᴏɴɪᴄ Nᴏx")
+        w = ui.welcome_kb().inline_keyboard
+        self.assertEqual(w[0][0].style, "success")
+        self.assertIn("Aᴅᴅ Tᴏ Gʀᴏᴜᴘ", w[0][0].text)
+        self.assertIn("Qᴜᴇᴜᴇ", ui.queue_text(room(cur=trk(1), queue=[trk(2)])))
 
 
 if __name__ == "__main__":

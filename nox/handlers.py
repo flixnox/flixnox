@@ -211,7 +211,7 @@ async def cmd_join(m: Message):
         return
     if not store.group(m.chat.id)["panel"]:
         return await m.reply("The room isn't open yet. Ask an admin to send /start first.")
-    await m.reply("🎧 <b>" + ui.sc("tap to join the room") + "</b>", reply_markup=ui.join_kb(m.chat.id))
+    await m.reply("🎧 <b>" + ui.tc("tap to join the room") + "</b>", reply_markup=ui.join_kb(m.chat.id))
 
 
 @router.message(Command("play"), F.chat.type.in_(GROUPS))
