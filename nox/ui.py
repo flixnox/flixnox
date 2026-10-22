@@ -212,3 +212,13 @@ def settings_kb(g):
         [btn("🧹 Auto-delete: " + ("On" if g["autodel"] else "Off"), cb="set:autodel:" + ("0" if g["autodel"] else "1"), style=S if g["autodel"] else P)],
         [btn("🗑 Clear queue", cb="set:clear", style=D), btn("✖ Close", cb="set:close", style=P)],
     )
+
+
+def closed_caption():
+    return "\n".join([head("🎧 <b>" + tc("nox room") + "</b>", "🔴 <b>" + tc("closed") + "</b>"), DIV,
+                       "🌙 <b>" + tc("the room has ended") + "</b>", tc("thanks for listening"), DIV,
+                       "▶️ " + tc("admins: send /start to open a new room")])
+
+
+def ended_text():
+    return "\n".join([head("⏹ <b>" + tc("room closed") + "</b>"), DIV, "▶️ " + tc("send /start to open it again")])

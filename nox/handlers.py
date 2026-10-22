@@ -140,8 +140,34 @@ async def _update_panel(chat_id):
         _pending.pop(chat_id, None)
 
 
+# ---------------- tidy chat: a request's messages disappear once its song is on air ----------------
+_qmsgs = {}                # chat_id -> message ids of /queue replies (stale as soon as the song changes)
+
+
+def _delete_msgs(chat_id, ids, delay=0):
+    if not ids:
+        return
+
+    async def _go():
+        if delay:
+            await asyncio.sleep(delay)
+        for mid in ids:
+            try:
+                await bot.delete_message(chat_id, mid)
+            except TelegramAPIError:
+                pass                                   # no delete right, or already gone
+    rooms.spawn(_go())
+
+
 def on_play(room, track):
     store.inc("plays")
+    _delete_msgs(room.chat_id, _qmsgs.pop(room.chat_id, []))
+    track["started"] = True
+    _delete_msgs(room.chat_id, track.pop("msgs", []), 20 if track.get("instant") else 0)
+
+
+def on_drop(room, track):
+    _delete_msgs(room.chat_id, track.pop("msgs", []))
 
 
 def on_fail(room, track):
@@ -238,14 +264,22 @@ async def cmd_play(m: Message, command: CommandObject):
     pos = room.add(t)
     if pos is None:
         return await m.reply("The queue is full right now.")
-    await m.reply(ui.added_text(t, pos, t["by"]), reply_markup=ui.join_kb(m.chat.id))
+    reply = await m.reply(ui.added_text(t, pos, t["by"]), reply_markup=ui.join_kb(m.chat.id))
     await _autodel(m)
+    msgs = [reply.message_id] + ([] if store.group(m.chat.id)["autodel"] else [m.message_id])
+    t["instant"] = pos == "start"
+    if t.get("started"):
+        _delete_msgs(m.chat.id, msgs, 20 if t["instant"] else 0)
+    else:
+        t["msgs"] = msgs                                  # removed when this song starts playing
 
 
 @router.message(Command("queue"), F.chat.type.in_(GROUPS))
 async def cmd_queue(m: Message):
     if await guard(m):
-        await m.reply(ui.queue_text(rooms.get(m.chat.id, create=False)))
+        r = await m.reply(ui.queue_text(rooms.get(m.chat.id, create=False)))
+        ids = _qmsgs.setdefault(m.chat.id, [])
+        ids[:] = (ids + [r.message_id, m.message_id])[-20:]
 
 
 # ---------------- invite: anyone in the room can call the rest of the group ----------------
@@ -322,10 +356,50 @@ def _make(cmd, fn, txt):
 
 for _c, _f, _t in (("skip", "skip", "⏭ Skipped."), ("pause", "pause", "⏸ Paused."), ("resume", "resume", "▶ Resumed."),
                    ("shuffle", "shuffle", "🔀 Queue shuffled."), ("clear", "clear", "🧹 Queue cleared."),
-                   ("end", "end", "⏹ Room stopped."),
                    ("loop", "toggle_loop", lambda on: "🔁 Loop on." if on else "➡ Loop off."),
                    ("autoplay", "toggle_autoplay", lambda on: "♾ Autoplay on, I'll keep similar songs coming." if on else "Autoplay off.")):
     _make(_c, _f, _t)
+
+
+# ---------------- /end: the room lives from /start until an admin ends it ----------------
+async def close_room(chat_id):
+    mid = store.group(chat_id).get("panel")
+    room = rooms.get(chat_id, create=False)
+    store.set_group(chat_id, panel=None)                  # first: /play and new joins are refused from now on
+    if room is not None:
+        await room.end()
+        for c in list(room.clients.values()):
+            await c.send({"t": "fatal", "m": "The room was ended by an admin."})
+            await c.close()
+        rooms.drop(chat_id)
+    _qmsgs.pop(chat_id, None)
+    if mid:
+        try:
+            await bot.edit_message_caption(chat_id=chat_id, message_id=mid, caption=ui.closed_caption(), reply_markup=None)
+        except TelegramBadRequest:
+            try:
+                await bot.edit_message_text(ui.closed_caption(), chat_id=chat_id, message_id=mid, reply_markup=None)
+            except TelegramAPIError:
+                pass
+        except TelegramAPIError:
+            pass
+        try:
+            await bot.unpin_chat_message(chat_id, mid)
+        except TelegramAPIError:
+            pass
+
+
+@router.message(Command("end"), F.chat.type.in_(GROUPS))
+async def cmd_end(m: Message):
+    if not await guard(m):
+        return
+    if not await admin_of(m):
+        return await m.reply("🔒 Only group admins can do this.")
+    if not store.group(m.chat.id)["panel"]:
+        return await m.reply("The room isn't open. Send /start to open it.")
+    await close_room(m.chat.id)
+    await m.reply(ui.ended_text())
+    await _autodel(m)
 
 
 # ---------------- buttons on the room message ----------------
@@ -370,7 +444,10 @@ async def cb_queue(cb: CallbackQuery):
     if not await guard_cb(cb):
         return
     await cb.answer()
-    _temp(await cb.message.reply(ui.queue_text(rooms.get(cb.message.chat.id, create=False))), 45)
+    r = await cb.message.reply(ui.queue_text(rooms.get(cb.message.chat.id, create=False)))
+    ids = _qmsgs.setdefault(cb.message.chat.id, [])
+    ids[:] = (ids + [r.message_id])[-20:]
+    _temp(r, 45)
 
 
 # ---------------- settings (group admins) ----------------

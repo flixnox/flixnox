@@ -160,8 +160,8 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0;min-width:0;
 .mt{min-width:0}.mt b{display:block;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.mt span{display:block;font-size:12px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .mbar{position:absolute;left:0;right:0;bottom:0;height:3px;background:rgba(var(--blue),.12)}
 .mfill{height:100%;width:var(--p,0%);background:linear-gradient(90deg,#19b5ff,#2f6bff,#7c5cff)}
-.nav{position:relative;display:grid;grid-template-columns:repeat(3,1fr);padding:6px;border-radius:26px}
-.slider{position:absolute;top:6px;bottom:6px;left:6px;width:calc((100% - 12px)/3);border-radius:20px;background:linear-gradient(145deg,rgba(var(--blue),.2),rgba(var(--blue),.08));box-shadow:0 6px 18px rgba(var(--blue),.25),inset 0 1px 0 rgba(255,255,255,.8);transition:transform .45s var(--spring)}
+.nav{position:relative;display:grid;grid-template-columns:repeat(4,1fr);padding:6px;border-radius:26px}
+.slider{position:absolute;top:6px;bottom:6px;left:6px;width:calc((100% - 12px)/4);border-radius:20px;background:linear-gradient(145deg,rgba(var(--blue),.2),rgba(var(--blue),.08));box-shadow:0 6px 18px rgba(var(--blue),.25),inset 0 1px 0 rgba(255,255,255,.8);transition:transform .45s var(--spring)}
 .tab{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 0 7px;color:var(--mut);font-weight:700;font-size:12px;transition:color .3s}
 .tab.on{color:rgb(var(--blue))}
 .tab:active .i{transform:scale(.85)}.tab .i{transition:transform .25s var(--spring)}
@@ -187,3 +187,21 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0;min-width:0;
 @keyframes pulse{50%{transform:scale(1.05)}}
 .veil .card{position:static;transform:none;border-radius:28px;max-width:360px;text-align:center}
 @media (prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;transition-duration:.01ms!important}}
+
+/* ---------- people + voice ---------- */
+.prow{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:12px;padding:10px 12px;margin-bottom:10px;border-radius:20px;animation:rowin .5s var(--ease) both}
+.av{position:relative;width:46px;height:46px;border-radius:50%;display:grid;place-items:center;font-weight:800;font-size:18px;color:#fff;background:linear-gradient(135deg,hsl(var(--h,215) 85% 62%),hsl(calc(var(--h,215) + 40) 80% 52%)) center/cover;box-shadow:0 6px 14px rgba(var(--blue),.22);font-variant-caps:normal;letter-spacing:0}
+.av.speaking{box-shadow:0 0 0 3px #fff,0 0 0 6px rgba(16,185,129,.85);animation:talk 1s ease-in-out infinite}
+@keyframes talk{50%{box-shadow:0 0 0 3px #fff,0 0 0 9px rgba(16,185,129,.35)}}
+.pn{min-width:0}.pn b{display:block;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pn span{display:block;font-size:12px;color:var(--mut)}
+.pic{display:flex;gap:8px;align-items:center}
+.pic i{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;background:rgba(var(--c),.14);color:rgb(var(--c))}
+.pic i .i{width:16px;height:16px}
+.pic button.mx{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;background:rgba(244,63,94,.12);color:rgb(244,63,94)}
+.vdock{display:flex;gap:10px;flex-wrap:wrap;padding:12px;border-radius:24px;margin:0 0 6px}
+.vbtn{flex:1 1 auto;min-width:96px;height:48px;border-radius:16px;display:flex;align-items:center;justify-content:center;gap:8px;font-weight:800;font-size:14px;color:#fff;background:linear-gradient(135deg,rgba(var(--c),1),rgba(var(--c),.75));box-shadow:0 8px 20px rgba(var(--c),.35);transition:transform .2s var(--spring)}
+.vbtn:active{transform:scale(.95)}.vbtn .i{width:19px;height:19px}.vbtn.off{background:rgba(var(--c),.14);color:rgb(var(--c));box-shadow:none}
+.stage{position:relative;border-radius:24px;overflow:hidden;margin:0 0 12px;background:#0b1633}
+.stage video{display:block;width:100%;max-height:46vh;background:#0b1633;object-fit:contain}
+.stagetag{position:absolute;left:12px;top:12px;padding:5px 11px;border-radius:99px;font-size:12px;font-weight:800;color:#fff;background:rgba(11,22,51,.6);font-variant-caps:normal}

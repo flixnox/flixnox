@@ -122,15 +122,47 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
         await self.room.skip()
         self.assertIsNone(self.room.cur)
 
-    async def test_pause_resume_and_empty_room(self):
+    async def test_empty_room_keeps_running(self):
         a = FakeClient(1)
         await self.room.join(a)
         self.room.add(self.track("one"))
         await self.settle()
-        await self.room.leave(a)                               # last listener leaves -> auto pause
-        self.assertTrue(self.room.paused)
-        await self.room.join(FakeClient(2))                    # someone returns -> auto resume
+        await self.room.leave(a)                               # everyone left: the room goes on until /end
         self.assertFalse(self.room.paused)
+        self.assertEqual(self.room.cur["title"], "one")
+
+    async def test_autoplay_stops_after_three_in_an_empty_room(self):
+        n = 0
+
+        async def related(cur, played):
+            nonlocal n
+            n += 1
+            return [self.track(f"auto{n}")]
+        sys.modules["nox.music"].related = related
+        self.room.autoplay = True
+        self.room.add(self.track("one"))
+        await self.settle()
+        for _ in range(6):
+            await self.room._finish(self.room.seq)
+        self.assertIsNone(self.room.cur)                       # nobody listening -> stopped after ~3 songs
+        self.assertLessEqual(self.room.empty_plays, 3)
+        a = FakeClient(1)
+        await self.room.join(a)
+        self.room.add(self.track("two"))
+        await self.settle()
+        await self.room._finish(self.room.seq)
+        self.assertIsNotNone(self.room.cur)                    # with a listener autoplay keeps going
+
+    async def test_people_list(self):
+        a = FakeClient(1)
+        a.name, a.photo, a.adm, a.v, a.m, a.s = "Zed", None, True, True, True, False
+        b = FakeClient(2)
+        b.name, b.photo, b.adm, b.v, b.m, b.s = "Amy", None, False, False, False, False
+        await self.room.join(b)
+        await self.room.join(a)
+        msg = self.room.people_msg()
+        self.assertEqual([r["id"] for r in msg["list"]], [1, 2])      # voice users first
+        self.assertEqual(msg["n"], 2)
 
     async def test_stale_reports_ignored(self):
         self.room.add(self.track("one"))

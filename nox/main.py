@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import admin, broadcast, config, handlers, music, security, state
 from .security import clean_text, same
-from .state import bot, conn_rl, penalty, rooms, search_rl, store, ws_rl
+from .state import bot, conn_rl, penalty, rooms, rtc_rl, search_rl, store, ws_rl
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("nox")
@@ -37,7 +37,7 @@ CSP = ("default-src 'none'; script-src 'self' https://telegram.org; style-src 's
        "frame-ancestors https://web.telegram.org https://*.telegram.org")
 SEC_HEADERS = {
     "Content-Security-Policy": CSP, "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer",
-    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+    "Permissions-Policy": "camera=(), microphone=(self), display-capture=(self), geolocation=(), payment=()",
     "Cross-Origin-Opener-Policy": "same-origin", "Strict-Transport-Security": "max-age=31536000",
 }
 
@@ -47,6 +47,7 @@ async def lifespan(app):
     await store.init(config.MONGO_URI, config.MONGO_DB)
     state.me = await bot.get_me()
     rooms.on_play, rooms.on_fail, rooms.panel_changed = handlers.on_play, handlers.on_fail, handlers.panel_changed
+    rooms.on_drop = handlers.on_drop
     await bot.set_webhook(f"{config.PUBLIC_URL}/webhook/{config.WEBHOOK_PATH}", secret_token=config.WEBHOOK_TOKEN,
                           allowed_updates=["message", "callback_query", "my_chat_member"], max_connections=40)
     try:
@@ -125,10 +126,19 @@ async def webhook(path: str, request: Request):
 
 
 # ---------------- WebSocket: one room per group ----------------
+MAX_SPEAKERS = 8
+
+
 class Client:
     def __init__(self, ws, user):
         self.ws, self.user, self.uid = ws, user, user["id"]
         self.lock = asyncio.Lock()
+        self.name = clean_text(user.get("first_name", "") or "Listener", 30)
+        ph = str(user.get("photo_url") or "")
+        self.photo = ph if ph.startswith("https://t.me/i/userpic/") and len(ph) < 220 else None
+        self.adm = False
+        self.joined = int(time.time())
+        self.v = self.m = self.s = False          # in voice / muted / sharing screen
 
     async def send(self, msg):
         try:
@@ -197,7 +207,8 @@ async def ws_endpoint(ws: WebSocket):
             return await fatal("This room is full.")
         client = Client(ws, user)
         admin_now = await state.is_admin(chat_id, uid)
-        await client.send({"t": "hello", "admin": admin_now, "room": g.get("title", "")[:60],
+        client.adm = admin_now
+        await client.send({"t": "hello", "admin": admin_now, "id": uid, "ice": config.ICE, "room": g.get("title", "")[:60],
                            "me": clean_text(user.get("first_name", ""), 32),
                            "link": f"https://t.me/{config.BOT_USERNAME}/{config.MINIAPP_SHORT}?startapp={security.encode_room(chat_id)}"})
         await room.join(client)
@@ -205,9 +216,10 @@ async def ws_endpoint(ws: WebSocket):
 
         while True:
             raw = await asyncio.wait_for(ws.receive_text(), 90)
-            if len(raw) > 4096:
+            is_rtc = raw.startswith('{"t":"rtc"')
+            if len(raw) > (16384 if is_rtc else 4096):
                 return await ws.close(code=1009)
-            if not ws_rl.allow(uid):
+            if not (rtc_rl if is_rtc else ws_rl).allow(uid):
                 penalty.strike(uid)
                 await client.send({"t": "err", "m": "Slow down a little."})
                 continue
@@ -237,6 +249,9 @@ async def handle(t, js, room, client, chat_id, uid, name):
     seq = js.get("seq")
     if t == "ping":
         adm = await state.is_admin(chat_id, uid)
+        if adm != client.adm:
+            client.adm = adm
+            room.people_changed()
         return await send({"t": "pong", "c": js.get("c"), "st": time.time(), "adm": adm})
     if t == "ended":
         return await room.vote_end(uid, seq)
@@ -244,6 +259,41 @@ async def handle(t, js, room, client, chat_id, uid, name):
         return room.report_dur(uid, seq, js.get("dur"))
     if t == "bad":
         return await room.vote_bad(uid, seq)
+    if t == "vstate":                                   # voice / screen flags (the audio itself goes peer to peer)
+        v, s_ = bool(js.get("v")), bool(js.get("s"))
+        m = bool(js.get("m")) if v else False
+        if v and not client.v and sum(1 for c in room.clients.values() if c.v) >= MAX_SPEAKERS:
+            return await send({"t": "vdeny", "m": f"Voice is full ({MAX_SPEAKERS} speakers). Try again later."})
+        if s_ and not client.s and any(c.s for c in room.clients.values()):
+            return await send({"t": "vdeny", "k": "s", "m": "Someone is already sharing their screen."})
+        client.v, client.m, client.s = v, m, s_
+        return room.people_changed()
+    if t == "rtc":                                      # relay WebRTC handshakes between two members of this room
+        k, to, d = js.get("k"), js.get("to"), js.get("d")
+        target = room.clients.get(to) if isinstance(to, int) and to != uid else None
+        if k not in ("mic", "scr") or target is None or not isinstance(d, dict):
+            return
+        clean = {"o": 1 if d.get("o") else 0}
+        sd, cd = d.get("s"), d.get("c")
+        if isinstance(sd, dict) and sd.get("type") in ("offer", "answer") and isinstance(sd.get("sdp"), str) and len(sd["sdp"]) < 14000:
+            if sd["type"] == "offer" and not (client.v if k == "mic" else client.s):
+                return                                  # only people who are really in voice / sharing may send offers
+            clean["s"] = {"type": sd["type"], "sdp": sd["sdp"]}
+        elif isinstance(cd, dict) and isinstance(cd.get("candidate"), str) and len(cd["candidate"]) < 800:
+            mid = cd.get("sdpMid")
+            idx = cd.get("sdpMLineIndex")
+            clean["c"] = {"candidate": cd["candidate"], "sdpMid": mid if isinstance(mid, str) and len(mid) < 40 else None,
+                          "sdpMLineIndex": idx if isinstance(idx, int) and 0 <= idx < 8 else 0}
+        else:
+            return
+        return await target.send({"t": "rtc", "from": uid, "k": k, "d": clean})
+    if t == "vmute":                                    # admins can mute someone's mic
+        if not await state.is_admin(chat_id, uid):
+            return await send({"t": "err", "m": "Only group admins can do this."})
+        target = room.clients.get(js.get("to")) if isinstance(js.get("to"), int) else None
+        if target is not None and target.v:
+            await target.send({"t": "vmute", "by": name})
+        return
     if t == "invite":                                   # any member in the room may call the rest of the group
         if await handlers.invite_group(chat_id, name) is None:
             return await send({"t": "err", "m": "An invite was just sent. Try again in a minute."})
@@ -298,7 +348,7 @@ async def handle(t, js, room, client, chat_id, uid, name):
         elif t == "clear":
             await room.clear()
         elif t == "end":
-            await room.end()
+            await handlers.close_room(chat_id)
         else:
             await room.remove(js.get("i"))
         return

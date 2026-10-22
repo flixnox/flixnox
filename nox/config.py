@@ -1,5 +1,6 @@
 """Settings, read once from environment variables. Nothing secret is hard-coded."""
 import hashlib
+import json
 import hmac
 import os
 import sys
@@ -48,3 +49,25 @@ def _derive(label):
 
 WEBHOOK_PATH = _derive("path")[:40]     # secret URL path
 WEBHOOK_TOKEN = _derive("token")        # secret header Telegram sends with every update
+
+
+def _ice():
+    """WebRTC servers for voice. Default = free STUN. For phones behind strict NATs add a TURN server via ICE_SERVERS (JSON)."""
+    out = [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}]
+    raw = _env("ICE_SERVERS", "")
+    if raw:
+        try:
+            out = []
+            for e in json.loads(raw)[:6]:
+                u = e["urls"] if isinstance(e["urls"], list) else [e["urls"]]
+                item = {"urls": [str(x)[:200] for x in u[:4]]}
+                if e.get("username"):
+                    item["username"], item["credential"] = str(e["username"])[:200], str(e.get("credential", ""))[:200]
+                out.append(item)
+        except Exception:
+            print("[config] ICE_SERVERS is not valid JSON, using the default STUN servers", file=sys.stderr)
+            out = [{"urls": ["stun:stun.l.google.com:19302"]}]
+    return out
+
+
+ICE = _ice()

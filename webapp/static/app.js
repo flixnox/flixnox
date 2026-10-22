@@ -3,12 +3,12 @@
   const tg = window.Telegram && window.Telegram.WebApp;
   const $ = (id) => document.getElementById(id);
   const au = $("au"), pre = new Audio();
-  pre.preload = "auto";
-  const TABS = ["now", "search", "queue"];
+  pre.preload = "none";
+  const TABS = ["now", "search", "queue", "people"];
   const TAGS = [["Arijit Singh", "c-blue"], ["Lo-fi chill", "c-violet"], ["Punjabi hits", "c-mint"], ["Shreya Ghoshal", "c-sky"],
     ["Taylor Swift", "c-amber"], ["Diljit Dosanjh", "c-teal"], ["Old is gold", "c-violet"], ["Gym workout", "c-blue"]];
 
-  let ws = null, st = null, admin = false, roomLink = "", off = 0, bestRtt = 1e9, localOff = false;
+  let ws = null, st = null, admin = false, roomLink = "", meId = 0, ice = [{ urls: ["stun:stun.l.google.com:19302"] }], off = 0, bestRtt = 1e9, localOff = false;
   let closing = false, dead = false, backoff = 1000, hb = null, tab = "now", searchTimer = null;
   let reqId = 0, lastReq = null, badSent = -1, nxtUrl = "", lyrOpen = false, qsig = "", lastCover = "", hinted = false;
   const cache = new Map(), pending = [];
@@ -110,6 +110,193 @@
     });
   };
 
+  // ---------- people + voice (audio and screen go peer to peer between members, the server only relays the handshake) ----------
+  let people = [];
+  const voice = { on: false, muted: false, share: false };
+  let micStream = null, scrStream = null, actx = null;
+  const out = new Map(), inc = new Map(), pendIn = new Map(), levels = new Map(), speaking = new Set();
+  const hue = (id) => (Math.abs(id | 0) * 47) % 360;
+  function vstate() { send({ t: "vstate", v: voice.on ? 1 : 0, m: voice.muted ? 1 : 0, s: voice.share ? 1 : 0 }); }
+  function rtcSend(to, k, d) { send({ t: "rtc", to: to, k: k, d: d }); }
+  function dropOut(key) { const r = out.get(key); if (!r) return; out.delete(key); try { r.pc.close(); } catch (e) {} }
+  function dropIn(key) {
+    const r = inc.get(key); pendIn.delete(key);
+    const k = key.split(":")[0], u = key.split(":")[1];
+    if (r) { inc.delete(key); try { r.pc.close(); } catch (e) {} }
+    if (k === "mic") { const el = document.getElementById("ra-" + u); if (el) el.remove(); levels.delete("u" + u); }
+    else { $("scr").srcObject = null; $("stage").hidden = !scrStream; }
+  }
+  function flush(r) { r.ready = true; const q = r.q; r.q = []; q.forEach((c) => r.pc.addIceCandidate(c).catch(() => {})); }
+  async function startOut(k, uid, stream, j) {
+    const key = k + ":" + uid, old = out.get(key);
+    if (old && old.j === j) return;
+    if (old) dropOut(key);
+    const pc = new RTCPeerConnection({ iceServers: ice }), rec = { pc: pc, q: [], ready: false, j: j };
+    out.set(key, rec);
+    stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+    pc.onicecandidate = (e) => { if (e.candidate) rtcSend(uid, k, { o: 1, c: e.candidate.toJSON() }); };
+    pc.onconnectionstatechange = () => { if (pc.connectionState === "failed" || pc.connectionState === "closed") dropOut(key); };
+    try {
+      const off = await pc.createOffer(); await pc.setLocalDescription(off);
+      rtcSend(uid, k, { o: 1, s: { type: "offer", sdp: pc.localDescription.sdp } });
+      if (k === "scr") pc.getSenders().forEach((sn) => {
+        if (sn.track && sn.track.kind === "video") { try { const p = sn.getParameters(); if (!p.encodings || !p.encodings.length) p.encodings = [{}]; p.encodings[0].maxBitrate = 700000; sn.setParameters(p).catch(() => {}); } catch (e) {} }
+      });
+    } catch (e) { dropOut(key); }
+  }
+  async function onRtc(m) {
+    const f = m.from, k = m.k, d = m.d || {}, key = k + ":" + f;
+    try {
+      if (d.o) {                                          // from the sender -> my incoming connection
+        if (d.s && d.s.type === "offer") {
+          dropIn(key);
+          const pc = new RTCPeerConnection({ iceServers: ice }), rec = { pc: pc, q: pendIn.get(key) || [], ready: false };
+          pendIn.delete(key); inc.set(key, rec);
+          pc.onicecandidate = (e) => { if (e.candidate) rtcSend(f, k, { o: 0, c: e.candidate.toJSON() }); };
+          pc.ontrack = (e) => attachRemote(k, f, e);
+          pc.onconnectionstatechange = () => { if (pc.connectionState === "failed" || pc.connectionState === "closed") dropIn(key); };
+          await pc.setRemoteDescription(d.s); flush(rec);
+          const ans = await pc.createAnswer(); await pc.setLocalDescription(ans);
+          rtcSend(f, k, { o: 0, s: { type: "answer", sdp: pc.localDescription.sdp } });
+        } else if (d.c) {
+          const r = inc.get(key);
+          if (!r) { const q = pendIn.get(key) || []; q.push(d.c); pendIn.set(key, q.slice(-40)); }
+          else if (r.ready) r.pc.addIceCandidate(d.c).catch(() => {}); else r.q.push(d.c);
+        }
+      } else {                                            // from a receiver -> my outgoing connection
+        const r = out.get(key); if (!r) return;
+        if (d.s && d.s.type === "answer") { await r.pc.setRemoteDescription(d.s); flush(r); }
+        else if (d.c) { if (r.ready) r.pc.addIceCandidate(d.c).catch(() => {}); else r.q.push(d.c); }
+      }
+    } catch (e) { dropIn(key); dropOut(key); }
+  }
+  function attachRemote(k, f, e) {
+    const stream = (e.streams && e.streams[0]) || new MediaStream([e.track]);
+    if (k === "mic") {
+      let el = document.getElementById("ra-" + f);
+      if (!el) { el = document.createElement("audio"); el.id = "ra-" + f; el.autoplay = true; el.setAttribute("playsinline", ""); $("remote").appendChild(el); }
+      el.srcObject = stream; const p = el.play(); if (p && p.catch) p.catch(() => { $("tap").hidden = false; });
+      watchLevel("u" + f, stream, f);
+    } else {
+      const v = $("scr"); v.srcObject = stream; $("stage").hidden = false; v.play().catch(() => {});
+      const p = people.find((x) => x.id === f); $("stagetag").textContent = (p ? p.n : "someone") + " is sharing";
+    }
+  }
+  function unlockRemote() { document.querySelectorAll("#remote audio").forEach((a) => a.play().catch(() => {})); const v = $("scr"); if (v.srcObject) v.play().catch(() => {}); }
+  function watchLevel(id, stream, uid) {                  // who is talking right now (green ring)
+    try {
+      actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+      const an = actx.createAnalyser(); an.fftSize = 256; actx.createMediaStreamSource(stream).connect(an);
+      levels.set(id, { an: an, uid: uid || meId, buf: new Uint8Array(an.fftSize) });
+    } catch (e) {}
+  }
+  setInterval(() => {
+    let changed = false;
+    levels.forEach((l, id) => {
+      l.an.getByteTimeDomainData(l.buf); let s = 0;
+      for (let i = 0; i < l.buf.length; i++) { const x = (l.buf[i] - 128) / 128; s += x * x; }
+      const on = Math.sqrt(s / l.buf.length) > 0.04 && !(l.uid === meId && voice.muted);
+      if (on !== speaking.has(l.uid)) { on ? speaking.add(l.uid) : speaking.delete(l.uid); changed = true; }
+    });
+    if (changed) document.querySelectorAll(".av[data-u]").forEach((e) => e.classList.toggle("speaking", speaking.has(+e.dataset.u)));
+  }, 200);
+
+  function syncVoice() {
+    const ids = new Set(people.map((p) => p.id));
+    [["mic", micStream, voice.on], ["scr", scrStream, voice.share]].forEach((a) => {
+      const k = a[0], stream = a[1], on = a[2];
+      if (on && stream) people.forEach((p) => { if (p.id !== meId) startOut(k, p.id, stream, p.j); });
+      [...out.keys()].forEach((key) => { const u = +key.split(":")[1]; if (key.startsWith(k + ":") && (!on || !ids.has(u))) dropOut(key); });
+    });
+    [...inc.keys()].forEach((key) => {
+      const p = people.find((x) => x.id === +key.split(":")[1]);
+      if (!p || (key.startsWith("mic:") ? !p.v : !p.s)) dropIn(key);
+    });
+    if (!people.some((p) => p.s) && !scrStream) { $("scr").srcObject = null; $("stage").hidden = true; }
+  }
+  setInterval(() => { if (voice.on || voice.share) syncVoice(); }, 6000);       // retry failed links
+  function onReconnect() { out.forEach((r, k) => dropOut(k)); if (voice.on || voice.share) vstate(); }
+  function resumeVoice() { if (micStream) micStream.getAudioTracks().forEach((t) => { t.enabled = !voice.muted; }); unlockRemote(); }
+  function onPeople(m) {
+    people = m.list || [];
+    $("pc").textContent = (m.n || people.length) + (m.n === 1 ? " listener" : " listeners");
+    const live = people.filter((p) => p.v).length, pb = $("pb"); pb.hidden = !live; pb.textContent = live;
+    renderPeople(); syncVoice();
+  }
+  function renderPeople() {
+    const list = $("plist"); list.replaceChildren();
+    people.forEach((p, i) => {
+      const r = h("div", "prow glass"); r.style.setProperty("--i", Math.min(i, 10));
+      const av = h("div", "av", (p.n || "?").trim().charAt(0).toUpperCase() || "?"); av.style.setProperty("--h", hue(p.id)); av.dataset.u = p.id;
+      if (p.p) bg(av, p.p);
+      if (speaking.has(p.id)) av.classList.add("speaking");
+      r.appendChild(av);
+      const t = h("div", "pn"); t.appendChild(h("b", "keep", p.n + (p.id === meId ? " (you)" : "")));
+      t.appendChild(h("span", null, p.s ? "sharing screen" : p.v ? (p.m ? "muted" : "in voice") : p.a ? "admin" : "listening"));
+      r.appendChild(t);
+      const ic = h("div", "pic");
+      if (p.s) { const e = h("i", "c-violet"); e.appendChild(ico("screen")); ic.appendChild(e); }
+      if (p.v) { const e = h("i", p.m ? "c-rose" : "c-mint"); e.appendChild(ico(p.m ? "micoff" : "mic")); ic.appendChild(e); }
+      if (admin && p.v && !p.m && p.id !== meId) {
+        const x = h("button", "mx"); x.appendChild(ico("micoff")); x.setAttribute("aria-label", "Mute"); x.onclick = () => { hap(); send({ t: "vmute", to: p.id }); toast("Muted " + p.n, "ok"); };
+        ic.appendChild(x);
+      }
+      r.appendChild(ic); list.appendChild(r);
+    });
+    renderVoice();
+  }
+  function renderVoice() {
+    $("v-join").hidden = voice.on; $("v-mute").hidden = !voice.on; $("v-leave").hidden = !voice.on;
+    const m = $("v-mute"); m.classList.toggle("off", voice.muted);
+    m.querySelector("span").textContent = voice.muted ? "unmute" : "mute";
+    m.querySelector("use").setAttribute("href", voice.muted ? "#i-micoff" : "#i-mic");
+    const sh = $("v-share"); sh.hidden = false; sh.classList.toggle("off", !voice.share); sh.classList.toggle("c-rose", voice.share); sh.classList.toggle("c-violet", !voice.share);
+    sh.querySelector("span").textContent = voice.share ? "stop share" : "share";
+  }
+  function setMute(on) {
+    voice.muted = on;
+    if (micStream) micStream.getAudioTracks().forEach((t) => { t.enabled = !on; });
+    vstate(); renderVoice();
+  }
+  async function joinVoice() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return toast("Voice isn't supported on this device", "err");
+    try { micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); }
+    catch (e) { return toast("Microphone is blocked. Allow it for Telegram in your phone settings.", "err"); }
+    voice.on = true; voice.muted = false; vstate(); watchLevel("me", micStream, meId); syncVoice(); renderVoice(); toast("You're in voice", "ok");
+  }
+  function leaveVoice() {
+    if (micStream) micStream.getTracks().forEach((t) => t.stop());
+    micStream = null; voice.on = false; voice.muted = false; levels.delete("me"); speaking.delete(meId);
+    vstate(); syncVoice(); renderVoice();
+  }
+  function stopShare() {
+    if (scrStream) scrStream.getTracks().forEach((t) => { t.onended = null; t.stop(); });
+    scrStream = null; voice.share = false; vstate(); syncVoice(); renderVoice();
+    if (!people.some((p) => p.s)) $("stage").hidden = true;
+  }
+  async function toggleShare() {
+    hap();
+    if (voice.share) return stopShare();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) return toast("Screen share isn't supported by Telegram on this phone. It works on Telegram Desktop.", "info");
+    try { scrStream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false }); }
+    catch (e) { return; }
+    voice.share = true; scrStream.getVideoTracks()[0].onended = stopShare;
+    const v = $("scr"); v.srcObject = scrStream; v.muted = true; $("stage").hidden = false; $("stagetag").textContent = "you are sharing";
+    vstate(); syncVoice(); renderVoice();
+  }
+  function onVDeny(m) {
+    toast(m.m || "Not allowed right now", "err");
+    if (m.k === "s") { if (scrStream) scrStream.getTracks().forEach((t) => t.stop()); scrStream = null; voice.share = false; $("stage").hidden = true; }
+    else leaveVoice();
+    renderVoice();
+  }
+  $("v-join").onclick = () => { hap(); joinVoice(); };
+  $("v-leave").onclick = () => { hap(); leaveVoice(); };
+  $("v-mute").onclick = () => { hap(); setMute(!voice.muted); };
+  $("v-share").onclick = toggleShare;
+  renderVoice();
+  window.addEventListener("pagehide", () => { try { leaveVoice(); stopShare(); } catch (e) {} });
+
   // ---------- tabs ----------
   function setTab(n) {
     tab = n;
@@ -124,31 +311,49 @@
   document.querySelectorAll(".tab").forEach((b) => { b.onclick = () => setTab(b.dataset.tab); });
 
   // ---------- audio sync (everyone hears the same second) ----------
-  function seekTo(t) { try { if (au.readyState >= 1) au.currentTime = Math.max(0, t); } catch (e) {} }
+  // Smooth, not jumpy: small drift is fixed by a tiny speed change, a seek only happens for big drift, and never while buffering.
+  let lastSeek = 0, lastRetry = 0;
+  au.preload = "auto";
+  function seekTo(t) { try { if (au.readyState >= 1) { au.currentTime = Math.max(0, t); lastSeek = Date.now(); } } catch (e) {} }
   function play() {
     if (localOff || !st || st.paused) return;
     const p = au.play();
-    if (p && p.catch) p.catch(() => { $("tap").hidden = false; });
+    if (p && p.catch) p.catch(() => { if (!document.hidden) $("tap").hidden = false; });
   }
-  $("tapbtn").onclick = () => { $("tap").hidden = true; localOff = false; seekTo(want()); play(); renderNow(); };
+  $("tapbtn").onclick = () => { $("tap").hidden = true; localOff = false; seekTo(want()); play(); renderNow(); unlockRemote(); };
   function loadTrack() {
-    badSent = -1;
+    badSent = -1; au.playbackRate = 1;
     au.onloadedmetadata = () => { send({ t: "meta", seq: st.seq, dur: au.duration }); seekTo(want()); play(); };
     au.src = st.url; au.load();
   }
   function syncAudio() {
     if (!st || !st.track || !au.src) return;
-    if (st.paused || localOff) { if (!au.paused) au.pause(); return; }
+    if (st.paused || localOff) { if (!au.paused) au.pause(); au.playbackRate = 1; return; }
     if (au.paused && au.readyState >= 2 && $("tap").hidden) play();
-    if (au.readyState >= 1 && Math.abs(au.currentTime - want()) > 0.7) seekTo(want());
+    if (au.readyState < 3) return;                                   // still buffering: never fight it, catch up after
+    const d = want() - au.currentTime, a = Math.abs(d);
+    if (a > 3) { if (Date.now() - lastSeek > 5000) { seekTo(want() + 0.3); au.playbackRate = 1; } }
+    else if (a > 0.4) au.playbackRate = d > 0 ? 1.04 : 0.96;         // gently speed up / slow down
+    else if (a < 0.15) au.playbackRate = 1;
+  }
+  function warmNext() {                                              // preload the next song only near the end, so it never competes with the current one
+    if (!st || !st.track || !st.nxt || st.nxt === nxtUrl) return;
+    const left = (isFinite(au.duration) && au.duration > 0 ? au.duration : (st.track.dur || 0)) - want();
+    if (left > 0 && left < 30) { nxtUrl = st.nxt; pre.preload = "auto"; pre.src = st.nxt; }
   }
   au.onended = () => { if (st) send({ t: "ended", seq: st.seq }); };
   au.onerror = () => { if (st && st.track && badSent !== st.seq) { badSent = st.seq; send({ t: "bad", seq: st.seq }); } };
+  au.addEventListener("pause", () => {                               // screen off / app in background: try to keep the music going
+    if (!st || !st.track || st.paused || localOff || au.ended || !document.hidden || Date.now() - lastRetry < 2000) return;
+    lastRetry = Date.now();
+    setTimeout(() => { if (au.paused && !localOff && st && !st.paused) { const p = au.play(); if (p && p.catch) p.catch(() => {}); } }, 300);
+  });
 
   function onState(m) {
     const isNew = !st || st.seq !== m.seq;
     st = m;
-    if (m.nxt && m.nxt !== nxtUrl) { nxtUrl = m.nxt; pre.src = m.nxt; }        // warm up the next song = instant change
+    if (isNew) nxtUrl = "";
+    st.nxt = m.nxt;
     renderNow(); renderQueue(); renderMini();
     if (!m.track) { au.pause(); au.removeAttribute("src"); return; }
     if (isNew) loadTrack(); else syncAudio();
@@ -208,8 +413,22 @@
       }
     } catch (e) {}
   }
-  setInterval(() => { syncAudio(); draw(); }, 500);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) { syncAudio(); if (!ws || ws.readyState > 1) connect(); } });
+  let posT = 0;
+  function mediaPos() {
+    try {
+      if (!("mediaSession" in navigator)) return;
+      navigator.mediaSession.playbackState = !st || !st.track || st.paused || localOff ? "paused" : "playing";
+      const d = isFinite(au.duration) && au.duration > 0 ? au.duration : (st && st.track && st.track.dur) || 0;
+      if (d && Date.now() - posT > 4000 && navigator.mediaSession.setPositionState) {
+        posT = Date.now();
+        navigator.mediaSession.setPositionState({ duration: d, playbackRate: 1, position: Math.min(d, Math.max(0, want())) });
+      }
+    } catch (e) {}
+  }
+  setInterval(() => { syncAudio(); warmNext(); draw(); mediaPos(); }, 500);
+  function wake() { syncAudio(); if (!ws || ws.readyState > 1) connect(); resumeVoice(); }
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) wake(); });
+  try { if (tg && tg.onEvent) tg.onEvent("activated", wake); } catch (e) {}
 
   // ---------- render: queue ----------
   function qRow(s, i) {
@@ -373,13 +592,17 @@
   function handle(m) {
     switch (m.t) {
       case "hello":
-        admin = !!m.admin; roomLink = m.link || ""; backoff = 1000; setConn(""); $("room").textContent = m.room || "live room";
+        admin = !!m.admin; roomLink = m.link || ""; meId = m.id || 0; if (Array.isArray(m.ice) && m.ice.length) ice = m.ice; onReconnect(); backoff = 1000; setConn(""); $("room").textContent = m.room || "live room";
         clearInterval(hb); send({ t: "ping", c: Date.now() });
         setTimeout(() => send({ t: "ping", c: Date.now() }), 600);
         hb = setInterval(() => send({ t: "ping", c: Date.now() }), 20000);
         qsig = ""; renderNow(); renderQueue();
         break;
       case "state": onState(m); break;
+      case "people": onPeople(m); break;
+      case "rtc": onRtc(m); break;
+      case "vdeny": onVDeny(m); break;
+      case "vmute": if (voice.on && !voice.muted) { setMute(true); toast((m.by || "An admin") + " muted you", "info"); } break;
       case "pong": {
         const rtt = Date.now() - m.c;
         if (rtt <= bestRtt + 30) { bestRtt = Math.min(bestRtt, rtt); off = m.st - (Date.now() - rtt / 2) / 1000; }

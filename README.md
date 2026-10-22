@@ -100,3 +100,11 @@ Bot token leak ho to turant BotFather me `/revoke` karo.
 - **Websocket connect nahi hota:** `PUBLIC_URL` bilkul Worker ka URL ho (https, bina trailing `/`).
 - **Buttons colored nahi:** purana Telegram app ho sakta hai, normal buttons dikhenge, kaam sab chalega.
 - Tests: `python -m unittest discover -s tests`
+
+## Room lifecycle, people and voice (v7)
+- The room lives from `/start` until an admin sends `/end` (the pinned message turns into "Room closed" and is unpinned). It keeps playing even if nobody is inside; with Autoplay on and an empty room it stops after about 3 songs.
+- When a requested song starts playing, its `/play` message and the "added" reply are deleted automatically (the bot needs the "Delete messages" admin right). `/queue` replies are deleted as soon as the song changes.
+- Mini App **People** tab: real Telegram names and photos, who is in voice / muted / sharing. Voice and screen share are peer to peer (WebRTC), the server only relays the handshake. Max 8 speakers, one screen share at a time. Admins can mute a speaker.
+- Phones behind strict mobile NATs may not connect with STUN only. Add a TURN server in Render with `ICE_SERVERS`, for example:
+  `[{"urls":["stun:stun.l.google.com:19302"]},{"urls":["turn:YOUR_TURN_HOST:3478"],"username":"USER","credential":"PASS"}]`
+- Screen share works on Telegram Desktop and Web. Telegram's mobile apps do not allow it inside Mini Apps, so the Share button explains that on phones.

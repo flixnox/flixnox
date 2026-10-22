@@ -27,6 +27,8 @@ class Room:
         self._wd = None
         self._kicking = False
         self.ended_votes, self.bad_votes, self.durs = set(), set(), {}
+        self.empty_plays = 0              # songs started while nobody was in the room (limits autoplay)
+        self._pp = None                   # pending 'people' broadcast
 
     # ---- state ----
     def position(self):
@@ -52,23 +54,45 @@ class Room:
         if only is None:
             self.mgr.panel_changed(self.chat_id)
 
+    # ---- people (voice-chat style participants list) ----
+    def people_msg(self):
+        rows = [{"id": c.uid, "n": getattr(c, "name", "Listener"), "p": getattr(c, "photo", None), "a": int(bool(getattr(c, "adm", False))),
+                 "v": int(bool(getattr(c, "v", False))), "m": int(bool(getattr(c, "m", False))), "s": int(bool(getattr(c, "s", False))), "j": getattr(c, "joined", 0)}
+                for c in self.clients.values()]
+        rows.sort(key=lambda r: (-r["s"], -r["v"], -r["a"], r["n"].lower()))
+        return {"t": "people", "n": len(rows), "list": rows[:80]}
+
+    def people_changed(self):
+        """Coalesced: many joins/leaves/mutes within 0.4 s become a single broadcast."""
+        if self._pp is None:
+            self._pp = self.mgr.spawn(self._push_people())
+
+    async def _push_people(self):
+        try:
+            await asyncio.sleep(0.4)
+        finally:
+            self._pp = None
+        msg = self.people_msg()
+        await asyncio.gather(*[c.send(msg) for c in list(self.clients.values())], return_exceptions=True)
+
     # ---- clients ----
     async def join(self, client):
         old = self.clients.get(client.uid)
         self.clients[client.uid] = client
         if old is not None and old is not client:
             await old.close()
+        self.empty_plays = 0
         if self.auto_paused:
             await self.resume()
         await self.push()
+        self.people_changed()
 
     async def leave(self, client):
+        """The room keeps running (until /end) even when nobody is inside. Joining again syncs to the live position."""
         if self.clients.get(client.uid) is client:
             del self.clients[client.uid]
-        if not self.clients:
-            await self.pause(auto=True)      # nobody listening -> the room clock stops
-        else:
-            await self.push()
+        await self.push()
+        self.people_changed()
 
     # ---- queue ----
     def add(self, track):
@@ -97,7 +121,8 @@ class Room:
         """Move to the next playable track. Caller must hold the lock."""
         from . import music
         self._cancel_wd()
-        if not self.queue and self.autoplay and self.cur is not None and hasattr(music, "related"):
+        if (not self.queue and self.autoplay and self.cur is not None and hasattr(music, "related")
+                and (self.clients or self.empty_plays < 3)):          # empty room: stop after ~3 songs
             try:
                 for t in (await asyncio.wait_for(music.related(self.cur, set(self.played)), 12))[:3]:
                     t.update(by="Autoplay", by_id=0, src="auto")
@@ -115,6 +140,7 @@ class Room:
             if r:
                 self.cur, self.url, self.preview = t, r["url"], r["preview"]
                 self.played.append(t.get("id"))
+                self.empty_plays = 0 if self.clients else self.empty_plays + 1
                 self.pos0, self.t0, self.paused, self.auto_paused = 0.0, time.time(), False, False
                 self.seq += 1
                 self.ended_votes, self.bad_votes, self.durs = set(), set(), {}
@@ -159,6 +185,8 @@ class Room:
         return True
 
     async def clear(self):
+        for t in self.queue:
+            self.mgr.on_drop(self, t)
         self.queue.clear()
         await self.push()
         return True
@@ -175,6 +203,8 @@ class Room:
 
     async def end(self):
         async with self.lock:
+            for t in self.queue:
+                self.mgr.on_drop(self, t)
             self.queue.clear()
             self.cur, self.url, self.paused = None, None, False
             self.seq += 1
@@ -184,7 +214,7 @@ class Room:
 
     async def remove(self, idx):
         if isinstance(idx, int) and 0 <= idx < len(self.queue):
-            self.queue.pop(idx)
+            self.mgr.on_drop(self, self.queue.pop(idx))
             await self.push()
             return True
         return False
@@ -237,7 +267,7 @@ class Room:
     def _arm_wd(self):
         self._cancel_wd()
         dur = max(self.durs.values()) if self.durs else ((self.cur or {}).get("dur") or 900)
-        self._wd = self.mgr.spawn(self._watch(self.seq, max(5, dur - self.position()) + 40))
+        self._wd = self.mgr.spawn(self._watch(self.seq, max(5, dur - self.position()) + (40 if self.clients else 2)))
 
     async def _watch(self, seq, delay):
         try:
@@ -252,6 +282,7 @@ class Manager:
         self.rooms, self.tasks = {}, set()
         self.on_play = lambda room, track: None
         self.on_fail = lambda room, track: None
+        self.on_drop = lambda room, track: None
         self.panel_changed = lambda chat_id: None
 
     def spawn(self, coro):
