@@ -27,11 +27,11 @@ class S(StatesGroup):
 def panel():
     m = bool(store.get_kv("maint", False))
     return ui.kb(
-        [ui.btn("📊 Stats", cb="ad:stats", style="primary"), ui.btn("🩺 API health", cb="ad:health")],
-        [ui.btn("📣 Broadcast", cb="ad:bc", style="success")],
-        [ui.btn("🚫 Ban", cb="ad:ban"), ui.btn("♻️ Unban", cb="ad:unban")],
-        [ui.btn("🛠 Maintenance: " + ("ON" if m else "OFF"), cb="ad:mt", style="primary" if m else None),
-         ui.btn("🧹 Clear cache", cb="ad:cc")],
+        [ui.btn("📊 Stats", cb="ad:stats", style=ui.P), ui.btn("🩺 API health", cb="ad:health", style=ui.P)],
+        [ui.btn("📣 Broadcast", cb="ad:bc", style=ui.S)],
+        [ui.btn("🚫 Ban", cb="ad:ban", style=ui.D), ui.btn("♻️ Unban", cb="ad:unban", style=ui.S)],
+        [ui.btn("🛠 Maintenance: " + ("ON" if m else "OFF"), cb="ad:mt", style=ui.D if m else ui.S),
+         ui.btn("🧹 Clear cache", cb="ad:cc", style=ui.P)],
     )
 
 
@@ -56,7 +56,7 @@ async def stats(cb: CallbackQuery):
     s = store.summary()
     listeners = sum(len(r.clients) for r in rooms.rooms.values())
     live = sum(1 for r in rooms.rooms.values() if r.cur)
-    txt = (f"📊 <b>Stats</b>\nUsers: <b>{s['users']}</b> (blocked/left {s['users_dead']})\n"
+    txt = (f"📊 <b>{ui.sc('stats')}</b>\nUsers: <b>{s['users']}</b> (blocked/left {s['users_dead']})\n"
            f"Groups with a room: <b>{s['groups']}</b> (removed {s['groups_dead']})\n"
            f"Rooms playing now: <b>{live}</b> • listeners: <b>{listeners}</b>\n"
            f"Plays today: <b>{s['plays_today']}</b> • total: <b>{s['plays_total']}</b>\nBanned: <b>{s['bans']}</b>")
@@ -68,7 +68,7 @@ async def stats(cb: CallbackQuery):
 async def health(cb: CallbackQuery):
     await cb.answer("Checking…")
     rows = await music.health()
-    txt = "🩺 <b>API health</b>\n" + "\n".join(
+    txt = f"🩺 <b>{ui.sc('api health')}</b>\n" + "\n".join(
         f"{'✅' if ok else '❌'} {n}" + (f" ({ms} ms)" if ms is not None else "") for n, ok, ms in rows)
     await cb.message.edit_text(txt, reply_markup=ui.kb([ui.btn("⬅ Back", cb="ad:home")]))
 
@@ -139,8 +139,8 @@ async def do_unban(m: Message, state: FSMContext):
 @router.callback_query(F.data == "ad:bc")
 async def bc_start(cb: CallbackQuery):
     await cb.message.edit_text("📣 <b>Broadcast</b>\nWho should receive it?", reply_markup=ui.kb(
-        [ui.btn("👤 Users", cb="ad:bca:users"), ui.btn("👥 Groups", cb="ad:bca:groups")],
-        [ui.btn("🌐 Both", cb="ad:bca:both")], [ui.btn("⬅ Back", cb="ad:home")]))
+        [ui.btn("👤 Users", cb="ad:bca:users", style=ui.P), ui.btn("👥 Groups", cb="ad:bca:groups", style=ui.S)],
+        [ui.btn("🌐 Both", cb="ad:bca:both", style=ui.P)], [ui.btn("⬅ Back", cb="ad:home")]))
     await cb.answer()
 
 
@@ -153,7 +153,7 @@ async def bc_audience(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text(
         "How should it be sent?\n\n<b>Copy</b>: text or any media, no \"Forwarded from\" label.\n"
         "<b>Forward</b>: keeps the original source (e.g. the channel name).",
-        reply_markup=ui.kb([ui.btn("📄 Copy", cb="ad:bcm:copy", style="primary"), ui.btn("↪ Forward", cb="ad:bcm:forward")],
+        reply_markup=ui.kb([ui.btn("📄 Copy", cb="ad:bcm:copy", style=ui.P), ui.btn("↪ Forward", cb="ad:bcm:forward", style=ui.S)],
                            [ui.btn("⬅ Back", cb="ad:bc")]))
     await cb.answer()
 
@@ -167,7 +167,7 @@ async def bc_mode(cb: CallbackQuery, state: FSMContext):
     d = await state.get_data()
     if d.get("aud") in ("groups", "both"):
         await cb.message.edit_text("Pin the message in groups?", reply_markup=ui.kb(
-            [ui.btn("📌 Yes, pin", cb="ad:bcp:1", style="success"), ui.btn("No", cb="ad:bcp:0")]))
+            [ui.btn("📌 Yes, pin", cb="ad:bcp:1", style=ui.S), ui.btn("No", cb="ad:bcp:0", style=ui.P)]))
     else:
         await state.update_data(pin=False)
         await _await_msg(cb.message, state)
@@ -202,7 +202,7 @@ async def bc_preview(m: Message, state: FSMContext):
     s = store.summary()
     n = {"users": s["users"], "groups": s["groups"], "both": s["users"] + s["groups"]}[d["aud"]]
     await m.answer(f"☝️ Preview. Send to about <b>{n}</b> chats ({d['aud']}, {d['mode']}{', pinned' if d.get('pin') else ''})?",
-                   reply_markup=ui.kb([ui.btn("✅ Send now", cb="ad:bcgo", style="success"), ui.btn("✖ Cancel", cb="ad:home")]))
+                   reply_markup=ui.kb([ui.btn("✅ Send now", cb="ad:bcgo", style=ui.S), ui.btn("✖ Cancel", cb="ad:home", style=ui.D)]))
 
 
 @router.callback_query(F.data == "ad:bcgo")
@@ -218,7 +218,7 @@ async def bc_go(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     rooms.spawn(broadcast.run(bc_id))
     await cb.message.edit_text("📣 Broadcast started. I'll message you when it's done.",
-                               reply_markup=ui.kb([ui.btn("⛔ Stop", cb=f"ad:bcs:{bc_id}"), ui.btn("⬅ Panel", cb="ad:home")]))
+                               reply_markup=ui.kb([ui.btn("⛔ Stop", cb=f"ad:bcs:{bc_id}", style=ui.D), ui.btn("⬅ Panel", cb="ad:home")]))
     await cb.answer()
 
 

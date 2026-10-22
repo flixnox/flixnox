@@ -1,63 +1,79 @@
 "use strict";
 (function () {
-  var tg = window.Telegram && window.Telegram.WebApp;
-  var $ = function (id) { return document.getElementById(id); };
-  var au = $("au");
-  var ws = null, st = null, admin = false, off = 0, bestRtt = 1e9, localOff = false;
-  var closing = false, dead = false, backoff = 1000, hb = null, searchTimer = null, prevQ = -1;
+  const tg = window.Telegram && window.Telegram.WebApp;
+  const $ = (id) => document.getElementById(id);
+  const au = $("au"), pre = new Audio();
+  pre.preload = "auto";
+  const TABS = ["now", "search", "queue"];
+  const TAGS = [["Arijit Singh", "c-blue"], ["Lo-fi chill", "c-violet"], ["Punjabi hits", "c-mint"], ["Shreya Ghoshal", "c-sky"],
+    ["Taylor Swift", "c-amber"], ["Diljit Dosanjh", "c-teal"], ["Old is gold", "c-violet"], ["Gym workout", "c-blue"]];
 
+  let ws = null, st = null, admin = false, off = 0, bestRtt = 1e9, localOff = false;
+  let closing = false, dead = false, backoff = 1000, hb = null, tab = "now", searchTimer = null;
+  let reqId = 0, lastReq = null, badSent = -1, nxtUrl = "", lyrOpen = false, qsig = "", lastCover = "", hinted = false;
+  const cache = new Map(), pending = [];
+
+  // ---------- tiny helpers ----------
   function h(tag, cls, text) {
-    var e = document.createElement(tag);
+    const e = document.createElement(tag);
     if (cls) e.className = cls;
     if (text != null) e.textContent = text;
     return e;
   }
+  function ico(name) {
+    const s = document.createElementNS("http://www.w3.org/2000/svg", "svg"), u = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    s.setAttribute("class", "i"); u.setAttribute("href", "#i-" + name); s.appendChild(u);
+    return s;
+  }
+  const cssUrl = (u) => 'url("' + String(u).replace(/["\\\n\r]/g, "") + '")';
+  function bg(el, url) { if (url) el.style.backgroundImage = cssUrl(url); }
   function hap(k) { try { tg.HapticFeedback.impactOccurred(k || "light"); } catch (e) {} }
   function fmt(s) { s = Math.max(0, Math.floor(s || 0)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); }
-  function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
-  function nowS() { return Date.now() / 1000 + off; }
-  function want() {
-    if (!st || !st.track) return 0;
-    return st.paused ? st.pos : st.pos + (nowS() - st.st);
-  }
-  var tt;
-  function toast(x) {
-    var e = $("toast");
-    e.textContent = x; e.classList.add("show");
-    clearTimeout(tt); tt = setTimeout(function () { e.classList.remove("show"); }, 2600);
+  function send(o) { if (ws && ws.readyState === 1) { ws.send(JSON.stringify(o)); return true; } return false; }
+  const nowS = () => Date.now() / 1000 + off;
+  function want() { return !st || !st.track ? 0 : (st.paused ? st.pos : st.pos + (nowS() - st.st)); }
+  let tt;
+  function toast(x, kind) {
+    const e = $("toast");
+    e.dataset.k = kind || "info"; $("toastx").textContent = x; e.classList.add("show");
+    clearTimeout(tt); tt = setTimeout(() => e.classList.remove("show"), 2600);
   }
   function fatal(msg) {
     dead = true; $("fatalmsg").textContent = msg; $("fatal").hidden = false;
     try { if (ws) ws.close(); } catch (e) {}
     au.pause();
   }
-  function cover(el, url, isArt) {
-    if (url) {
-      if (isArt) { el.style.setProperty("--cv", 'url("' + url + '")'); el.classList.add("cover"); }
-      else el.style.backgroundImage = 'url("' + url + '")';
-    } else if (isArt) { el.classList.remove("cover"); }
-  }
 
   // ---------- Telegram chrome ----------
   try {
     tg.ready(); tg.expand();
     if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
-    if (tg.setHeaderColor) tg.setHeaderColor("#f7faff");
-    if (tg.setBackgroundColor) tg.setBackgroundColor("#f7faff");
-    tg.BackButton.show(); tg.BackButton.onClick(askLeave);
+    if (tg.setHeaderColor) tg.setHeaderColor("#f4f8ff");
+    if (tg.setBackgroundColor) tg.setBackgroundColor("#f4f8ff");
+    if (tg.setBottomBarColor) tg.setBottomBarColor("#f4f8ff");
+    tg.BackButton.show(); tg.BackButton.onClick(goBack);
   } catch (e) {}
 
   // ---------- sheets ----------
   function sheet(build) {
-    var c = $("sc"); c.replaceChildren(); build(c);
+    const c = $("sc"); c.replaceChildren(); build(c);
     $("sheet").hidden = false;
-    requestAnimationFrame(function () { $("sheet").classList.add("open"); });
+    requestAnimationFrame(() => $("sheet").classList.add("open"));
   }
   function closeSheet() {
-    $("sheet").classList.remove("open");
-    setTimeout(function () { $("sheet").hidden = true; }, 260);
+    lyrOpen = false; $("sheet").classList.remove("open");
+    setTimeout(() => { if (!$("sheet").classList.contains("open")) $("sheet").hidden = true; }, 380);
   }
   $("sheetbg").onclick = closeSheet;
+  function confirmSheet(title, text, yesLabel, color, onYes, noLabel) {
+    sheet((c) => {
+      c.appendChild(h("h3", null, title)); c.appendChild(h("p", null, text));
+      const b = h("div", "btns"), no = h("button", "bx c-blue", noLabel || "Cancel"), go = h("button", "bx " + color, yesLabel);
+      no.onclick = closeSheet;
+      go.onclick = () => { closeSheet(); onYes(); };
+      b.append(no, go); c.appendChild(b);
+    });
+  }
   function leave() {
     closing = true;
     try { if (ws) ws.close(); } catch (e) {}
@@ -65,30 +81,37 @@
     if (tg) tg.close(); else window.close();
   }
   function askLeave() {
-    sheet(function (c) {
-      c.appendChild(h("h3", null, "Leave the room?"));
-      c.appendChild(h("p", null, "Music stops on your phone. The room keeps playing for everyone else, and you can rejoin any time."));
-      var b = h("div", "btns"), stay = h("button", null, "Stay"), go = h("button", "go", "Leave");
-      stay.onclick = closeSheet; go.onclick = leave;
-      b.appendChild(stay); b.appendChild(go); c.appendChild(b);
-    });
+    hap();
+    confirmSheet("Leave the room?", "Music stops on your phone. The room keeps playing for everyone else, and you can rejoin any time.", "Leave", "c-rose", leave, "Stay");
   }
-  $("back").onclick = askLeave;
+  function goBack() { if (!$("sheet").hidden) closeSheet(); else if (tab !== "now") setTab("now"); else askLeave(); }
+  $("back").onclick = goBack;
 
-  // ---------- audio sync ----------
+  // ---------- tabs ----------
+  function setTab(n) {
+    tab = n;
+    TABS.forEach((id) => { $("v-" + id).hidden = id !== n; });
+    document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("on", b.dataset.tab === n));
+    $("slider").style.transform = "translateX(" + TABS.indexOf(n) * 100 + "%)";
+    $("views").scrollTop = 0;
+    renderMini(); hap();
+    if (n === "search") setTimeout(() => { try { $("q").focus({ preventScroll: true }); } catch (e) {} }, 300);
+    else $("q").blur();
+  }
+  document.querySelectorAll(".tab").forEach((b) => { b.onclick = () => setTab(b.dataset.tab); });
+
+  // ---------- audio sync (everyone hears the same second) ----------
   function seekTo(t) { try { if (au.readyState >= 1) au.currentTime = Math.max(0, t); } catch (e) {} }
   function play() {
     if (localOff || !st || st.paused) return;
-    var p = au.play();
-    if (p && p.catch) p.catch(function () { $("tap").hidden = false; });
+    const p = au.play();
+    if (p && p.catch) p.catch(() => { $("tap").hidden = false; });
   }
-  $("tapbtn").onclick = function () { $("tap").hidden = true; localOff = false; seekTo(want()); play(); render(); };
+  $("tapbtn").onclick = () => { $("tap").hidden = true; localOff = false; seekTo(want()); play(); renderNow(); };
   function loadTrack() {
-    au.onloadedmetadata = function () {
-      send({ t: "meta", seq: st.seq, dur: au.duration });
-      seekTo(want()); play();
-    };
-    au.src = st.url;
+    badSent = -1;
+    au.onloadedmetadata = () => { send({ t: "meta", seq: st.seq, dur: au.duration }); seekTo(want()); play(); };
+    au.src = st.url; au.load();
   }
   function syncAudio() {
     if (!st || !st.track || !au.src) return;
@@ -96,135 +119,258 @@
     if (au.paused && au.readyState >= 2 && $("tap").hidden) play();
     if (au.readyState >= 1 && Math.abs(au.currentTime - want()) > 0.7) seekTo(want());
   }
-  au.onended = function () { if (st) send({ t: "ended", seq: st.seq }); };
-  au.onerror = function () { if (st && st.track) send({ t: "bad", seq: st.seq }); };
+  au.onended = () => { if (st) send({ t: "ended", seq: st.seq }); };
+  au.onerror = () => { if (st && st.track && badSent !== st.seq) { badSent = st.seq; send({ t: "bad", seq: st.seq }); } };
 
   function onState(m) {
-    var isNew = !st || st.seq !== m.seq;
+    const isNew = !st || st.seq !== m.seq;
     st = m;
-    render();
+    if (m.nxt && m.nxt !== nxtUrl) { nxtUrl = m.nxt; pre.src = m.nxt; }        // warm up the next song = instant change
+    renderNow(); renderQueue(); renderMini();
     if (!m.track) { au.pause(); au.removeAttribute("src"); return; }
     if (isNew) loadTrack(); else syncAudio();
   }
 
-  // ---------- render ----------
-  function row(s, i, anim) {
-    var r = h("div", "row glass" + (anim ? "" : " old"));
-    r.style.setProperty("--i", i);
-    var th = h("div", "thumb"); th.style.setProperty("--h", 206 + (i * 9) % 60); cover(th, s.cover, false);
-    var t = h("div", "t"); t.appendChild(h("b", null, s.title));
-    t.appendChild(h("span", null, s.artist + " – added by " + (s.by || "someone")));
-    r.appendChild(th); r.appendChild(t);
-    r.appendChild(h("div", "src" + (s.src === "g" ? " g" : ""), s.src === "g" ? "Group" : "App"));
-    r.appendChild(h("em", null, s.dur ? fmt(s.dur) : ""));
-    return r;
-  }
-  function render() {
-    var t = st && st.track;
+  // ---------- render: now playing ----------
+  function renderNow() {
+    const t = st && st.track;
     $("title").textContent = t ? t.title : "Nothing playing";
-    $("artist").textContent = t ? t.artist : "Add a song below or send /play in the group";
-    var by = $("by"); by.hidden = !t;
-    if (t) by.textContent = "added by " + (t.by || "someone") + (st.preview ? " (30 s preview)" : "");
+    $("artist").textContent = t ? t.artist : "Add a song to start the party";
+    $("kick").textContent = !t ? "idle" : (st.paused ? "paused" : "now playing");
+    const by = $("by"); by.hidden = !t;
+    if (t) by.textContent = "added by " + (t.by || "someone") + (st.preview ? " · 30 s preview" : "");
     $("n").textContent = st ? st.n : 0;
-    cover($("art"), t && t.cover, true);
-    var paused = !t || st.paused || localOff;
-    $("app").classList.toggle("paused", paused);
-    var list = $("list"), q = st ? st.queue : [];
-    list.replaceChildren();
-    q.forEach(function (s, i) { list.appendChild(row(s, i, prevQ < 0 || i >= prevQ)); });
-    if (st && st.qn > q.length) list.appendChild(h("div", "row glass more", "+" + (st.qn - q.length) + " more"));
-    prevQ = q.length;
-    $("qc").textContent = st && st.qn ? st.qn + (st.qn === 1 ? " song" : " songs") : "empty";
-    ["shuf", "skip", "loop"].forEach(function (id) { $(id).classList.toggle("lock", !admin); });
-    $("loop").classList.toggle("on", !!(st && st.loop));
+    const art = $("art"), cv = t && t.cover || "";
+    if (cv) { art.style.setProperty("--cv", cssUrl(cv)); art.classList.add("cover"); } else art.classList.remove("cover");
+    if (cv !== lastCover) {
+      lastCover = cv; const a = $("amb");
+      if (cv) { a.style.backgroundImage = cssUrl(cv); a.classList.add("on"); } else a.classList.remove("on");
+    }
+    const paused = !t || st.paused || localOff;
+    $("app").classList.toggle("is-paused", paused);
+    $("app").classList.toggle("app-playing", !paused);
+    ["shuf", "skip", "loop", "auto", "q-shuf", "q-auto", "q-clear"].forEach((id) => $(id).classList.toggle("lock", !admin));
+    ["loop", "q-loop"].forEach((id) => { if ($(id)) $(id).classList.toggle("on", !!(st && st.loop)); });
+    ["auto", "q-auto"].forEach((id) => $(id).classList.toggle("on", !!(st && st.auto)));
     $("adm").hidden = !admin;
     media();
   }
-  function draw() {
-    if (!st || !st.track) { $("fill").style.setProperty("--p", "0%"); $("cur").textContent = "0:00"; $("dur").textContent = "0:00"; return; }
-    var d = isFinite(au.duration) && au.duration > 0 ? au.duration : (st.track.dur || 0);
-    var p = want();
-    $("fill").style.setProperty("--p", (d ? Math.min(100, p / d * 100) : 0) + "%");
-    $("cur").textContent = fmt(p); $("dur").textContent = d ? fmt(d) : "--:--";
+  function renderMini() {
+    const t = st && st.track, show = !!t && tab !== "now";
+    $("mini").hidden = !show;
+    if (!show) return;
+    $("m-t").textContent = t.title; $("m-a").textContent = t.artist;
+    const th = $("m-th"); th.style.backgroundImage = ""; bg(th, t.cover);
   }
+  function draw() {
+    const t = st && st.track;
+    const d = t ? (isFinite(au.duration) && au.duration > 0 ? au.duration : (t.dur || 0)) : 0, p = t ? want() : 0;
+    const pct = (d ? Math.min(100, p / d * 100) : 0) + "%";
+    $("fill").style.setProperty("--p", pct); $("m-fill").style.setProperty("--p", pct);
+    $("cur").textContent = fmt(p); $("dur").textContent = d ? fmt(d) : (t ? "--:--" : "0:00");
+  }
+  let mediaSet = false;
   function media() {
     try {
-      if (!("mediaSession" in navigator) || !st || !st.track) return;
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: st.track.title, artist: st.track.artist,
-        artwork: st.track.cover ? [{ src: st.track.cover, sizes: "512x512" }] : []
-      });
+      if (!("mediaSession" in navigator)) return;
+      if (st && st.track) {
+        navigator.mediaSession.metadata = new MediaMetadata({ title: st.track.title, artist: st.track.artist,
+          artwork: st.track.cover ? [{ src: st.track.cover, sizes: "512x512" }] : [] });
+      }
+      if (!mediaSet) {
+        mediaSet = true;
+        navigator.mediaSession.setActionHandler("play", () => { if (admin) send({ t: "resume" }); else { localOff = false; play(); renderNow(); } });
+        navigator.mediaSession.setActionHandler("pause", () => { if (admin) send({ t: "pause" }); else { localOff = true; au.pause(); renderNow(); } });
+        navigator.mediaSession.setActionHandler("nexttrack", () => { if (admin) send({ t: "skip" }); });
+      }
     } catch (e) {}
   }
-  setInterval(function () { syncAudio(); draw(); }, 500);
-  document.addEventListener("visibilitychange", function () { if (!document.hidden) { syncAudio(); if (!ws || ws.readyState > 1) connect(); } });
+  setInterval(() => { syncAudio(); draw(); }, 500);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { syncAudio(); if (!ws || ws.readyState > 1) connect(); } });
+
+  // ---------- render: queue ----------
+  function qRow(s, i) {
+    const r = h("div", "row qrow glass"); r.style.setProperty("--i", Math.min(i, 10));
+    r.appendChild(h("div", "idx", String(i + 1)));
+    const th = h("div", "thumb"); th.style.setProperty("--h", 206 + (i * 11) % 60); bg(th, s.cover); r.appendChild(th);
+    const t = h("div", "t"); t.appendChild(h("b", "keep", s.title)); t.appendChild(h("span", "keep", s.artist + " · " + (s.by || "someone")));
+    r.appendChild(t);
+    r.appendChild(h("div", "src" + (s.src === "g" ? " g" : s.src === "auto" ? " a2" : ""), s.src === "g" ? "group" : s.src === "auto" ? "auto" : "app"));
+    if (admin) {
+      const x = h("button", "rm"); x.appendChild(ico("x")); x.setAttribute("aria-label", "Remove");
+      x.onclick = () => { hap(); send({ t: "remove", i: i }); };
+      r.appendChild(x);
+    } else r.appendChild(h("em", null, s.dur ? fmt(s.dur) : ""));
+    return r;
+  }
+  function emptyBox(icon, title, text, cta, fn) {
+    const e = h("div", "empty"), o = h("div", "orbico");
+    o.appendChild(ico(icon)); e.appendChild(o); e.appendChild(h("b", null, title)); e.appendChild(h("div", null, text));
+    if (cta) { const b = h("button", "chip c-blue", cta); b.onclick = fn; e.appendChild(b); }
+    return e;
+  }
+  function renderQueue() {
+    const q = st ? st.queue : [], qn = st ? st.qn : 0;
+    $("qc").textContent = qn ? qn + (qn === 1 ? " song" : " songs") : "empty";
+    const badge = $("qb"); badge.hidden = !qn; badge.textContent = qn > 99 ? "99+" : qn;
+    const sig = q.map((x) => x.title + "|" + x.by + "|" + x.src).join("\n") + "#" + admin + "#" + qn;
+    if (sig === qsig) return;
+    qsig = sig;
+    const list = $("list"); list.replaceChildren();
+    if (!q.length) list.appendChild(emptyBox("note", "Queue is empty", "Add songs and they line up here.", "Find songs", () => setTab("search")));
+    q.forEach((s, i) => list.appendChild(qRow(s, i)));
+    if (qn > q.length) list.appendChild(h("div", "empty", "+" + (qn - q.length) + " more"));
+  }
 
   // ---------- controls ----------
-  $("pp").onclick = function () {
+  function togglePlay() {
     hap();
-    if (!st || !st.track) return toast("Nothing is playing");
-    if (admin) { send({ t: st.paused ? "resume" : "pause" }); return; }
-    localOff = !localOff;                       // listeners can only mute themselves
-    if (localOff) au.pause(); else { seekTo(want()); play(); }
-    render();
-  };
-  function adminOnly(type) {
-    return function () { hap(); if (!admin) return toast("Only group admins can do this"); send({ t: type }); };
+    if (!st || !st.track) return toast("Nothing is playing yet. Add a song!", "info");
+    if (admin) return void send({ t: st.paused ? "resume" : "pause" });
+    localOff = !localOff;                                   // listeners can only pause their own phone
+    if (localOff) { au.pause(); if (!hinted) { hinted = true; toast("Paused on your phone only. The room keeps playing.", "info"); } }
+    else { seekTo(want()); play(); }
+    renderNow();
   }
-  $("skip").onclick = adminOnly("skip"); $("shuf").onclick = adminOnly("shuffle"); $("loop").onclick = adminOnly("loop");
-  $("lyr").onclick = function () { hap(); send({ t: "lyrics" }); };
+  $("pp").onclick = togglePlay; $("m-pp").onclick = togglePlay;
+  $("mini").onclick = (e) => { if (!e.target.closest("#m-pp")) setTab("now"); };
+  function adminAct(id, type, ok) {
+    $(id).onclick = () => {
+      hap(admin ? "light" : "rigid");
+      if (!admin) return toast("Only group admins can do this", "err");
+      if (type !== "clear" && type !== "autoplay" && type !== "loop" && !(st && st.track)) return toast("Nothing is playing yet", "info");
+      if (type === "clear") return confirmSheet("Clear the queue?", "All upcoming songs will be removed. The current song keeps playing.", "Clear", "c-rose", () => send({ t: "clear" }));
+      send({ t: type }); if (ok) toast(ok, "ok");
+    };
+  }
+  adminAct("shuf", "shuffle", "Queue shuffled"); adminAct("skip", "skip");
+  adminAct("loop", "loop"); adminAct("auto", "autoplay");
+  adminAct("q-shuf", "shuffle", "Queue shuffled"); adminAct("q-auto", "autoplay"); adminAct("q-clear", "clear");
+  $("lyr").onclick = () => {
+    hap();
+    if (!st || !st.track) return toast("Nothing is playing yet", "info");
+    lyrOpen = true;
+    sheet((c) => { c.appendChild(h("h3", "keep", st.track.title)); const l = h("div", "loader"); l.append(h("i"), h("i"), h("i")); c.appendChild(l); });
+    send({ t: "lyrics" });
+    setTimeout(() => { if (lyrOpen && $("sc").querySelector(".loader")) fillLyrics(st && st.track ? st.track.title : "Lyrics", ""); }, 12000);
+  };
+  function fillLyrics(title, text) {
+    if (!lyrOpen) return;
+    const c = $("sc"); c.replaceChildren(); c.appendChild(h("h3", "keep", title || "Lyrics"));
+    c.appendChild(text ? h("pre", null, text) : h("p", null, "No lyrics found for this song."));
+  }
 
   // ---------- search / add ----------
-  function closeResults() { $("res").classList.remove("open"); $("res").replaceChildren(); }
-  $("q").oninput = function () {
-    clearTimeout(searchTimer);
-    var v = $("q").value.trim();
-    if (v.length < 2) return closeResults();
-    searchTimer = setTimeout(function () { send({ t: "search", q: v }); }, 400);
-  };
-  function onResults(m) {
-    if (m.q !== $("q").value.trim()) return;
-    var box = $("res"); box.replaceChildren();
-    (m.items || []).slice(0, 6).forEach(function (it, i) {
-      var b = h("button", "sg"), th = h("i", "thumb"), tx = h("span", "tx");
-      th.style.setProperty("--h", 204 + i * 10); cover(th, it.cover, false);
-      tx.appendChild(h("b", null, it.title)); tx.appendChild(h("small", null, it.artist));
-      b.appendChild(th); b.appendChild(tx);
-      b.onclick = function () { hap(); send({ t: "add", token: it.token }); $("q").value = ""; closeResults(); };
-      box.appendChild(b);
-    });
-    box.classList.toggle("open", box.children.length > 0);
-    if (!box.children.length) toast("No results");
+  function showSugg() { $("sugg").hidden = false; $("out").hidden = true; $("out").replaceChildren(); }
+  (function buildTags() {
+    const box = $("tags");
+    TAGS.forEach((t) => { const b = h("button", t[1], t[0]); b.onclick = () => { hap(); $("q").value = t[0]; $("qx").hidden = false; doSearch(t[0], false); }; box.appendChild(b); });
+  })();
+  function skeleton() {
+    $("sugg").hidden = true; const o = $("out"); o.hidden = false; o.replaceChildren();
+    for (let i = 0; i < 5; i++) o.appendChild(h("div", "sk"));
   }
-  function addFirst() { var b = $("res").querySelector(".sg"); if (b) b.click(); }
-  $("addbtn").onclick = addFirst;
-  $("q").addEventListener("keydown", function (e) { if (e.key === "Enter") addFirst(); });
+  function doSearch(q, artist) {
+    const key = q.toLowerCase() + "|" + (artist ? 1 : 0), c = cache.get(key);
+    lastReq = { q: q, artist: artist, id: ++reqId };
+    if (c && Date.now() - c.at < 420000) return renderResults(c.m);
+    skeleton();
+    if (!send({ t: "search", q: q, artist: artist ? 1 : 0, id: lastReq.id })) { toast("Reconnecting… try again in a moment", "err"); showSugg(); }
+  }
+  $("q").addEventListener("input", () => {
+    const v = $("q").value.trim(); $("qx").hidden = !v; clearTimeout(searchTimer);
+    if (v.length < 2) { lastReq = null; return showSugg(); }
+    searchTimer = setTimeout(() => doSearch(v, false), 380);
+  });
+  $("q").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault(); const v = $("q").value.trim();
+    if (v.length >= 2) { clearTimeout(searchTimer); doSearch(v, false); $("q").blur(); } else toast("Type at least 2 letters", "info");
+  });
+  $("qx").onclick = () => { hap(); $("q").value = ""; $("qx").hidden = true; lastReq = null; showSugg(); $("q").focus(); };
+
+  function resRow(it, i) {
+    const r = h("div", "row glass"); r.style.setProperty("--i", Math.min(i, 10));
+    const th = h("div", "thumb"); th.style.setProperty("--h", 205 + (i * 13) % 70); bg(th, it.cover);
+    const t = h("div", "t"); t.appendChild(h("b", "keep", it.title)); t.appendChild(h("span", "keep", it.artist));
+    const add = h("button", "add"); add.appendChild(ico("plus")); add.setAttribute("aria-label", "Add to queue");
+    const go = () => {
+      if (add.classList.contains("busy") || add.classList.contains("done")) return;
+      hap(); add.classList.add("busy");
+      if (!send({ t: "add", token: it.token })) { add.classList.remove("busy"); return toast("Reconnecting… try again", "err"); }
+      pending.push(add);
+      setTimeout(() => { const k = pending.indexOf(add); if (k >= 0) { pending.splice(k, 1); add.classList.remove("busy"); } }, 9000);
+    };
+    add.onclick = (e) => { e.stopPropagation(); go(); }; r.onclick = go;
+    r.append(th, t, h("em", null, it.dur ? fmt(it.dur) : ""), add);
+    return r;
+  }
+  function renderResults(m) {
+    $("sugg").hidden = true;
+    const o = $("out"); o.hidden = false; o.replaceChildren();
+    const items = m.items || [], arts = m.artists || [];
+    if (m.artist) {
+      const back = h("button", "chip c-blue back-chip"); back.append(ico("back"), document.createTextNode("all results"));
+      back.onclick = () => { hap(); const v = $("q").value.trim(); if (v.length >= 2) doSearch(v, false); else showSugg(); };
+      o.appendChild(back); o.appendChild(h("h2", "sec keep", "Top songs · " + (lastReq ? lastReq.q : "")));
+    }
+    if (arts.length && !m.artist) {
+      o.appendChild(h("h2", "sec", "artists"));
+      const strip = h("div", "artists");
+      arts.forEach((a) => {
+        const b = h("button", "ar"), i = h("i"); bg(i, a.cover);
+        b.append(i, h("span", "keep", a.name));
+        b.onclick = () => { hap(); doSearch(a.name, true); $("views").scrollTop = 0; };
+        strip.appendChild(b);
+      });
+      o.appendChild(strip);
+    }
+    if (items.length) {
+      if (!m.artist) o.appendChild(h("h2", "sec", "songs"));
+      items.forEach((it, i) => o.appendChild(resRow(it, i)));
+    } else if (!arts.length) {
+      o.appendChild(emptyBox("search", "No results", "Try the artist name or a different spelling.", "Clear search", () => $("qx").click()));
+    }
+  }
+  function onResults(m) {
+    if (!lastReq || m.id !== lastReq.id) return;                  // an old search finished late: ignore it
+    cache.set(lastReq.q.toLowerCase() + "|" + (lastReq.artist ? 1 : 0), { m: m, at: Date.now() });
+    if (cache.size > 40) cache.delete(cache.keys().next().value);
+    renderResults(m);
+  }
+  function settle(okay) {
+    const b = pending.shift();
+    if (!b) return;
+    b.classList.remove("busy");
+    if (okay) { b.classList.add("done"); b.replaceChildren(ico("check")); }
+  }
 
   // ---------- network ----------
-  function setConn(x) { $("conn").textContent = x || ""; }
+  function setConn(x) { $("conn").hidden = !x; $("conn").textContent = x || ""; }
   function handle(m) {
     switch (m.t) {
       case "hello":
         admin = !!m.admin; backoff = 1000; setConn(""); $("room").textContent = m.room || "live room";
         clearInterval(hb); send({ t: "ping", c: Date.now() });
-        setTimeout(function () { send({ t: "ping", c: Date.now() }); }, 600);
-        hb = setInterval(function () { send({ t: "ping", c: Date.now() }); }, 20000);
+        setTimeout(() => send({ t: "ping", c: Date.now() }), 600);
+        hb = setInterval(() => send({ t: "ping", c: Date.now() }), 20000);
+        qsig = ""; renderNow(); renderQueue();
         break;
       case "state": onState(m); break;
-      case "pong":
-        var rtt = Date.now() - m.c;
+      case "pong": {
+        const rtt = Date.now() - m.c;
         if (rtt <= bestRtt + 30) { bestRtt = Math.min(bestRtt, rtt); off = m.st - (Date.now() - rtt / 2) / 1000; }
-        if (admin !== !!m.adm) { admin = !!m.adm; render(); }
+        if (admin !== !!m.adm) { admin = !!m.adm; qsig = ""; renderNow(); renderQueue(); }
         break;
+      }
       case "results": onResults(m); break;
-      case "ok": toast(m.m); break;
-      case "err": toast(m.m); break;
-      case "lyrics":
-        sheet(function (c) {
-          c.appendChild(h("h3", null, m.title || "Lyrics"));
-          if (m.text) c.appendChild(h("pre", null, m.text)); else c.appendChild(h("p", null, "No lyrics found for this song."));
-        });
-        break;
+      case "ok": settle(true); toast(m.m, "ok"); break;
+      case "err":
+        if (/result|admin|queue|add/i.test(m.m)) settle(false);
+        if (/expired/i.test(m.m) && lastReq) { cache.clear(); doSearch(lastReq.q, lastReq.artist); }
+        if (/search|fast/i.test(m.m) && lastReq && !$("out").querySelector(".row")) { showSugg(); }
+        toast(m.m, "err"); break;
+      case "lyrics": fillLyrics(m.title, m.text); break;
       case "fatal": fatal(m.m); break;
     }
   }
@@ -232,15 +378,16 @@
     if (dead || closing) return;
     setConn(backoff > 1000 ? "Reconnecting…" : "Connecting…");
     ws = new WebSocket("wss://" + location.host + "/ws");
-    ws.onopen = function () { send({ t: "auth", initData: tg.initData }); };
-    ws.onmessage = function (e) { var m; try { m = JSON.parse(e.data); } catch (x) { return; } handle(m); };
-    ws.onclose = function () {
+    ws.onopen = () => { send({ t: "auth", initData: tg.initData }); };
+    ws.onmessage = (e) => { let m; try { m = JSON.parse(e.data); } catch (x) { return; } handle(m); };
+    ws.onclose = () => {
       clearInterval(hb);
       if (dead || closing) return;
       setConn("Reconnecting…");
       setTimeout(connect, backoff); backoff = Math.min(backoff * 1.6, 10000);
     };
   }
+  setTab("now"); renderNow(); renderQueue();
   if (!tg || !tg.initData) fatal("Open this room from the pinned message in your Telegram group.");
   else connect();
 })();

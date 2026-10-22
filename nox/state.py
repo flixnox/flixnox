@@ -15,8 +15,9 @@ bot = Bot(config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HT
 store = Store()
 rooms = Manager()
 cmd_rl = RateLimiter(0.5, 4)        # chat commands
+cb_rl = RateLimiter(3, 10)          # button taps (generous, so buttons never feel dead)
 ws_rl = RateLimiter(10, 25)         # websocket messages per user
-search_rl = RateLimiter(0.7, 3)     # searches per user
+search_rl = RateLimiter(1.5, 6)     # searches per user
 conn_rl = RateLimiter(0.3, 8)       # new websocket connections per IP
 penalty = Penalty()
 me = None                           # filled in at startup (bot.get_me())

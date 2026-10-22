@@ -14,7 +14,8 @@ export default {
     url.port = origin.port;
     const req = new Request(url.toString(), request);
     req.headers.set("X-Proxy-Secret", env.PROXY_SECRET);
-    const resp = await fetch(req);
+    const isStatic = p.startsWith("/static/") && request.method === "GET";
+    const resp = await fetch(req, isStatic ? { cf: { cacheEverything: true, cacheTtl: 31536000 } } : undefined);   // files are versioned (?v=), so long caching is safe
     if (resp.status === 101) return resp;                     // WebSocket upgrade
     const out = new Response(resp.body, resp);
     for (const k of [...out.headers.keys()]) {

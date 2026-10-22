@@ -1,5 +1,7 @@
-"""Music sources. Every third-party call is server-side with timeouts, caching and a circuit breaker."""
+"""Music source: JioSaavn API (songs, artists, direct audio links) + lyrics.
+Everything runs server-side with short timeouts, caching and a circuit breaker, so the room never waits on a slow API."""
 import asyncio
+import html
 import re
 import secrets
 import time
@@ -35,7 +37,7 @@ class TTL:
 
 
 class Breaker:
-    """4 failures within 60 s -> that source is skipped for 60 s."""
+    """4 failures within 30 s -> that endpoint is skipped for 30 s."""
 
     def __init__(self):
         self.fails, self.open_until = {}, {}
@@ -45,10 +47,10 @@ class Breaker:
 
     def fail(self, name):
         now = time.monotonic()
-        f = [t for t in self.fails.get(name, []) if now - t < 60] + [now]
+        f = [t for t in self.fails.get(name, []) if now - t < 30] + [now]
         self.fails[name] = f
         if len(f) >= 4:
-            self.open_until[name] = now + 60
+            self.open_until[name] = now + 30
             self.fails[name] = []
 
     def good(self, name):
@@ -56,21 +58,21 @@ class Breaker:
 
 
 BREAKER = Breaker()
-_SEARCH = TTL(300, 500)
-_RESULTS = TTL(600, 5000)
-_RES = TTL(600, 500)
-_LYR = TTL(3600, 300)
-_sem = asyncio.Semaphore(10)
+_SEARCH = TTL(600, 800)
+_RESULTS = TTL(900, 6000)
+_SONG = TTL(1800, 800)
+_LYR = TTL(3600, 400)
+_sem = asyncio.Semaphore(16)
 _client = None
-_YT_PATHS = ["/yt_music_audio/yt_music_audio", "/yt_music_audio"]   # the tester showed the doubled path; both are tried
 
 
 def client():
     global _client
     if _client is None:
         _client = httpx.AsyncClient(
-            timeout=httpx.Timeout(8.0, connect=4.0), follow_redirects=False,
-            headers={"User-Agent": "SonicNox/1.0", "x-api-key": config.CURIOUS_API_KEY}, limits=httpx.Limits(max_connections=30))
+            timeout=httpx.Timeout(7.0, connect=3.5), follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 SonicNox/2.0", "Accept": "application/json"},
+            limits=httpx.Limits(max_connections=40, max_keepalive_connections=20, keepalive_expiry=60))
     return _client
 
 
@@ -80,17 +82,17 @@ async def close():
 
 
 def clear_caches():
-    for c in (_SEARCH, _RESULTS, _RES, _LYR):
+    for c in (_SEARCH, _RESULTS, _SONG, _LYR):
         c.clear()
 
 
-async def _api(name, path, params=None, timeout=8.0):
+async def _api(name, path, params=None, base=None, timeout=7.0):
     if not BREAKER.ok(name):
         return None
     try:
         async with _sem:
-            r = await client().get(config.API_BASE + path, params=params, timeout=timeout)
-        if r.status_code != 200 or len(r.content) > 2_000_000:
+            r = await client().get((base or config.JIOSAAVN_BASE) + path, params=params, timeout=timeout)
+        if r.status_code != 200 or len(r.content) > 3_000_000:
             raise ValueError(r.status_code)
         js = r.json()
         BREAKER.good(name)
@@ -100,110 +102,161 @@ async def _api(name, path, params=None, timeout=8.0):
         return None
 
 
-# ---------- normalising whatever shape the APIs return ----------
-def _first(d, keys):
-    for k in keys:
-        v = d.get(k)
-        if v not in (None, "", [], {}):
-            return v
-    return None
+# ---------- turning JioSaavn JSON into small, safe dicts (tolerant of small format differences) ----------
+def _text(v, n=120):
+    return clean_text(html.unescape(v), n) if isinstance(v, str) else ""
 
 
-def _name(v):
-    if isinstance(v, dict):
-        v = _first(v, ("name", "username", "title"))
-    return v if isinstance(v, str) else ""
+def _https(u):
+    if isinstance(u, str) and u.startswith("http://"):
+        u = "https://" + u[7:]
+    return safe_https_url(u)
 
 
-def _secs(v):
+def _img(v):
+    """image may be [{quality,url}, ...], a url string or a dict. Prefer the biggest picture."""
+    urls = []
+    if isinstance(v, str):
+        urls = [v]
+    elif isinstance(v, dict):
+        urls = [v.get("url")]
+    elif isinstance(v, list):
+        urls = [(x.get("url") if isinstance(x, dict) else x) for x in v]
+    urls = [u for u in urls if isinstance(u, str) and u]
+    if not urls:
+        return None
+    u = urls[-1]
+    u = re.sub(r"-(50x50|150x150)\.", "-500x500.", u)
+    return _https(u)
+
+
+def _artist_names(item):
+    a = item.get("artists")
+    names = []
+    if isinstance(a, dict):
+        names = [x.get("name") for x in (a.get("primary") or a.get("all") or []) if isinstance(x, dict)]
+    elif isinstance(a, list):
+        names = [x.get("name") if isinstance(x, dict) else x for x in a]
+    if not [n for n in names if n]:
+        names = [item.get("primaryArtists") or item.get("primary_artists") or item.get("singers") or item.get("subtitle") or ""]
+    names = [_text(n, 40) for n in names if isinstance(n, str) and n.strip()]
+    return clean_text(", ".join(names[:3]), 80) or "Unknown artist"
+
+
+def _audio_map(item):
+    """{kbps: url}. Supports downloadUrl as a list of {quality,url} or a single url string."""
+    d = item.get("downloadUrl") or item.get("download_url") or item.get("media_url") or item.get("url_320")
+    out = {}
+    if isinstance(d, str):
+        u = _https(d)
+        if u:
+            out[160] = u
+    elif isinstance(d, list):
+        for x in d:
+            if not isinstance(x, dict):
+                continue
+            q = re.sub(r"\D", "", str(x.get("quality") or "")) or "0"
+            u = _https(x.get("url") or x.get("link"))
+            if u:
+                out[int(q)] = u
+    return out
+
+
+def _dur(v):
     try:
-        if isinstance(v, str):
-            if ":" in v:
-                s = 0
-                for part in v.split(":"):
-                    s = s * 60 + int(part)
-                return s if 5 <= s <= 14400 else None
-            m = re.match(r"^\s*([\d.]+)\s*min", v)
-            if m:
-                return int(float(m.group(1)) * 60)
         v = float(v)
-        if v > 10000:
-            v /= 1000.0           # milliseconds
         return int(v) if 5 <= v <= 14400 else None
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
-def pick_list(js, depth=0):
-    if isinstance(js, list):
-        return [x for x in js if isinstance(x, dict)]
-    if isinstance(js, dict) and depth < 2:
-        for k in ("data", "results", "tracks", "collection", "items", "result"):
-            v = js.get(k)
-            if isinstance(v, (list, dict)):
-                out = pick_list(v, depth + 1)
-                if out:
-                    return out
-    return []
-
-
-def normalize(item, src):
+def song(item):
     if not isinstance(item, dict):
         return None
-    title = clean_text(str(_first(item, ("title", "trackName", "name", "track_name", "track")) or ""), 120)
-    if not title:
+    title = _text(item.get("name") or item.get("title") or item.get("song"), 120)
+    sid = item.get("id")
+    if not title or not sid:
         return None
-    artist = _name(item.get("artist")) or _name(item.get("user")) or str(
-        _first(item, ("artistName", "artist_name", "author", "uploader")) or "")
-    album = item.get("album") if isinstance(item.get("album"), dict) else {}
-    cover = _first(album, ("cover_big", "cover_xl", "cover_medium", "cover")) or _first(
-        item, ("artworkUrl100", "artwork_url", "cover", "thumbnail", "image"))
-    if isinstance(cover, str):
-        cover = cover.replace("100x100bb", "600x600bb")
+    album = item.get("album")
     return {
-        "id": f"{src}:{item.get('id') or item.get('trackId') or ''}",
-        "src": src,
-        "title": title,
-        "artist": clean_text(artist, 80) or "Unknown artist",
-        "dur": _secs(_first(item, ("duration", "trackTimeMillis", "duration_ms", "full_duration"))),
-        "cover": safe_https_url(cover),
-        "preview": safe_https_url(_first(item, ("preview", "previewUrl", "preview_url"))),
-        "stream": safe_https_url(_first(item, ("stream_url", "streamUrl", "audioUrl", "media_url"))) if src == "soundcloud" else None,
+        "id": f"js:{sid}", "sid": str(sid)[:40], "src": "saavn", "title": title, "artist": _artist_names(item),
+        "album": _text(album.get("name") if isinstance(album, dict) else album, 80),
+        "dur": _dur(item.get("duration")), "cover": _img(item.get("image")), "aud": _audio_map(item),
+        "year": _text(str(item.get("year") or ""), 4),
     }
 
 
+def artist(item):
+    if not isinstance(item, dict) or not item.get("name"):
+        return None
+    return {"name": _text(item.get("name"), 60), "cover": _img(item.get("image")), "id": str(item.get("id") or "")[:40]}
+
+
+def _results(js):
+    d = js.get("data") if isinstance(js, dict) else None
+    if isinstance(d, dict):
+        r = d.get("results")
+        if isinstance(r, list):
+            return [x for x in r if isinstance(x, dict)]
+        s = d.get("songs")
+        if isinstance(s, dict) and isinstance(s.get("results"), list):
+            return s["results"]
+    if isinstance(d, list):
+        return [x for x in d if isinstance(x, dict)]
+    return []
+
+
+def pick_url(track, kbps=None):
+    """Best audio URL for a track, close to the wanted bitrate (default 160 kbps)."""
+    aud = track.get("aud") or {}
+    if not aud:
+        return None
+    want = kbps or config.AUDIO_KBPS
+    below = [q for q in aud if q <= want]
+    return aud[max(below)] if below else aud[min(aud)]
+
+
 # ---------- search ----------
-async def search(q):
+async def _songs(q, limit):
+    js = await _api("songs", "/search/songs", {"query": q, "limit": limit})
+    rows = _results(js)
+    if not rows:                                                  # fallback: global search endpoint
+        rows = _results(await _api("global", "/search", {"query": q}))
+    out, seen = [], set()
+    for r in rows:
+        s = song(r)
+        if s and s["sid"] not in seen:
+            seen.add(s["sid"])
+            out.append(s)
+    return out[:limit]
+
+
+async def _artists(q, limit):
+    rows = _results(await _api("artists", "/search/artists", {"query": q, "limit": limit}))
+    return [a for a in (artist(r) for r in rows) if a][:limit]
+
+
+async def search_all(q, songs=10, artists=4):
+    """One round trip for the Mini App: songs and artists fetched in parallel."""
     q = clean_text(q, 80)
     if len(q) < 2:
-        return []
-    key = q.lower()
+        return [], []
+    key = (q.lower(), songs, artists)
     hit = _SEARCH.get(key)
     if hit is not None:
-        return [dict(x) for x in hit]
-    jobs = [
-        ("deezer", "/deezer/search", {"q": q}),
-        ("itunes", "/itunes/search", {"term": q, "media": "music", "limit": 10}),
-        ("soundcloud", config.SC_SEARCH_PATH, {"q": q}),
-    ]
-    res = await asyncio.gather(*[_api(n, p, a) for n, p, a in jobs])
-    out, seen = [], set()
-    for (name, _, _), js in zip(jobs, res):
-        for it in pick_list(js)[:10]:
-            t = normalize(it, name)
-            if not t:
-                continue
-            k = (t["title"].lower(), t["artist"].lower())
-            if k not in seen:
-                seen.add(k)
-                out.append(t)
-    out = out[:10]
-    _SEARCH.put(key, out)
-    return [dict(x) for x in out]
+        return [dict(x) for x in hit[0]], hit[1]
+    s, a = await asyncio.gather(_songs(q, songs), _artists(q, artists) if artists else asyncio.sleep(0, result=[]))
+    _SEARCH.put(key, (s, a))
+    return [dict(x) for x in s], a
+
+
+async def search(q, limit=5):
+    """Used by /play in groups."""
+    return (await search_all(q, limit, 0))[0]
 
 
 def stash(user_id, items):
-    """Keep full results on the server; the browser only ever sees opaque tokens (anti-tamper)."""
+    """Full results stay on the server; the browser only gets opaque tokens (nobody can inject a fake track or URL)."""
     pub = []
     for t in items:
         tok = secrets.token_urlsafe(6)
@@ -219,66 +272,72 @@ def take(token, user_id):
     return dict(v[1])
 
 
-# ---------- audio ----------
+# ---------- playing ----------
 async def resolve(track):
-    """Find a playable URL right before playback (links expire). Returns {'url','preview','cover'} or None."""
-    key = track.get("id") or (track.get("title"), track.get("artist"))
-    hit = _RES.get(key)
-    if hit:
-        return hit
-    want = track.get("dur")
-    for q in (f'{track["artist"]} - {track["title"]}', f'{track["title"]} {track["artist"]} audio'):
-        for idx, path in enumerate(list(_YT_PATHS)):
-            js = await _api("yt" + path, path, {"q": q}, timeout=25.0)
+    """Audio link for a track. Search results already carry it, so this is instant in the normal case."""
+    url = pick_url(track)
+    if url:
+        return {"url": url, "preview": False, "cover": track.get("cover")}
+    sid = track.get("sid")
+    if sid:
+        cached = _SONG.get(sid)
+        if cached is None:
+            js = await _api("song", f"/songs/{quote(sid, safe='')}")
             d = js.get("data") if isinstance(js, dict) else None
-            if not isinstance(d, dict):
-                continue
-            url = safe_https_url(d.get("audioUrl"))
-            if not url:
-                continue
-            got = _secs(d.get("duration"))
-            if want and got and abs(got - want) / want > 0.3:      # wrong song/version -> try next
-                continue
-            if idx:
-                _YT_PATHS.insert(0, _YT_PATHS.pop(idx))             # remember the path that works
-            out = {"url": url, "preview": False, "cover": safe_https_url(d.get("cover"))}
-            _RES.put(key, out)
-            return out
-    if track.get("stream"):
-        return {"url": track["stream"], "preview": False, "cover": None}
-    if track.get("preview"):
-        return {"url": track["preview"], "preview": True, "cover": None}
+            first = d[0] if isinstance(d, list) and d else (d if isinstance(d, dict) else None)
+            cached = song(first) if first else None
+            if cached:
+                _SONG.put(sid, cached)
+        if cached and cached["aud"]:
+            track["aud"] = cached["aud"]
+            return {"url": pick_url(track), "preview": False, "cover": track.get("cover")}
+    rows = await search(f'{track.get("title", "")} {track.get("artist", "")}', 3)       # last resort
+    for r in rows:
+        if r["aud"]:
+            track["aud"] = r["aud"]
+            return {"url": pick_url(track), "preview": False, "cover": track.get("cover")}
     return None
 
 
-async def lyrics(artist, title):
-    key = (artist.lower(), title.lower())
+async def related(track, exclude=()):
+    """Songs similar to `track` (used by autoplay). Tries the suggestions endpoint, then the same artist."""
+    sid = track.get("sid")
+    rows = []
+    if sid:
+        js = await _api("suggest", f"/songs/{quote(sid, safe='')}/suggestions", {"limit": 10})
+        rows = _results(js)
+    out = [s for s in (song(r) for r in rows) if s]
+    if not out:
+        first = (track.get("artist") or "").split(",")[0].strip()
+        out = await search(first, 10) if first else []
+    return [s for s in out if s["id"] not in exclude and s["id"] != track.get("id") and s["aud"]][:6]
+
+
+async def lyrics(artist_name, title):
+    a = re.split(r"[,&]", artist_name or "")[0].strip()
+    t = re.sub(r"\s*[\(\[].*?[\)\]]", "", title or "").strip()
+    key = (a.lower(), t.lower())
     hit = _LYR.get(key)
     if hit is not None:
         return hit
-    js = await _api("lyrics", f"/lyrics_ovh/{quote(artist, safe='')}/{quote(title, safe='')}")
+    js = await _api("lyrics", f"/{quote(a, safe='')}/{quote(t, safe='')}", base=config.LYRICS_BASE, timeout=8.0)
     txt = js.get("lyrics") if isinstance(js, dict) else ""
-    txt = txt.strip()[:6000] if isinstance(txt, str) else ""
+    txt = txt.replace("\r", "").strip()[:6000] if isinstance(txt, str) else ""
     _LYR.put(key, txt)
     return txt
 
 
 async def health():
-    checks = [
-        ("Deezer", "/deezer/search", {"q": "test"}),
-        ("iTunes", "/itunes/search", {"term": "test", "media": "music", "limit": 1}),
-        ("SoundCloud", config.SC_SEARCH_PATH, {"q": "test"}),
-        ("YT Music Audio", _YT_PATHS[0], {"q": "test"}),
-        ("Lyrics.ovh", "/lyrics_ovh/Coldplay/Yellow", None),
-    ]
-
-    async def one(n, p, a):
+    async def one(n, path, params, base=None):
         t = time.monotonic()
         try:
             async with _sem:
-                r = await client().get(config.API_BASE + p, params=a, timeout=25.0)
+                r = await client().get((base or config.JIOSAAVN_BASE) + path, params=params, timeout=15.0)
             return n, r.status_code == 200, int((time.monotonic() - t) * 1000)
         except Exception:
             return n, False, None
 
-    return await asyncio.gather(*[one(*c) for c in checks])
+    return await asyncio.gather(
+        one("JioSaavn songs", "/search/songs", {"query": "arijit", "limit": 1}),
+        one("JioSaavn artists", "/search/artists", {"query": "arijit", "limit": 1}),
+        one("Lyrics", "/Coldplay/Yellow", None, config.LYRICS_BASE))

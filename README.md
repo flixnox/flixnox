@@ -1,5 +1,13 @@
 # Sonic Nox: live listening rooms for Telegram groups
 
+## v2: kya naya hai (purane repo par update kaise karein)
+- Music source ab **JioSaavn API** hai (full-length gaane, artists, cover art). URL code me default hai, Render me kuch add nahi karna.
+  Purani `CURIOUS_API_KEY`, `API_BASE`, `SC_SEARCH_PATH`, yt-dlp aur ffmpeg ki zarurat nahi, Render ke Environment se hata sakte ho.
+- Naya Mini App: Now / Search / Queue tabs, mini player, artist search, har button alag rang me, small caps font.
+- Bot ke buttons: har button coloured, har tap ka jawab milta hai, room message par gaane ka cover art lagta hai. Naye: Autoplay, `/autoplay`, `/join`.
+- Speed: gaana search result se seedha chalta hai (extra lookup nahi), agla gaana pehle se load hota hai, files gzip + long cache.
+- Update: purani repo ki saari files is zip ki files se replace karo, `git add . && git commit -m "v2" && git push`, Render khud redeploy karega.
+
 Bot ka naam: **SonicNoxBot**. Group me `/start` karo, `/play song` se gaane add karo, aur sab Mini App me ek saath sunein.
 
 ```
@@ -86,8 +94,8 @@ par Render free ke resources limited hain, aur third-party music APIs unofficial
 Bot token leak ho to turant BotFather me `/revoke` karo.
 
 ## Agar kuch na chale
-- **Audio nahi bajta:** Termux me `python test_apis.py` chalao, `api_report.txt` ka text bhejo. Field names badalne pad sakte hain
-  (`nox/music.py` ka `normalize`). SoundCloud ka search path alag ho to `SC_SEARCH_PATH` env me daalo.
+- **Audio nahi bajta / search khali:** Termux me `python test_apis.py` chalao aur `api_report.txt` ka text bhejo. Bot ka admin panel
+  (`/admin` -> API health) bhi JioSaavn ka status dikhata hai. API badalni ho to Render me `JIOSAAVN_BASE` daalo (default code me hi hai).
 - **Mini App "Open from group" bole:** link `t.me/SonicNoxBot/room?startapp=...` se hi khulna chahiye, browser se nahi.
 - **Websocket connect nahi hota:** `PUBLIC_URL` bilkul Worker ka URL ho (https, bina trailing `/`).
 - **Buttons colored nahi:** purana Telegram app ho sakta hai, normal buttons dikhenge, kaam sab chalega.

@@ -140,19 +140,102 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.room.cur["title"], "one")
 
 
-class NormalizeTests(unittest.TestCase):
-    def test_shapes(self):
+SAMPLE_SONG = {
+    "id": "3IoDK8qI", "name": "Kesariya (From &quot;Brahmastra&quot;)", "type": "song", "year": "2022", "duration": 268,
+    "album": {"id": "1", "name": "Brahmastra"},
+    "artists": {"primary": [{"id": "459320", "name": "Arijit Singh"}, {"id": "2", "name": "Pritam"}], "featured": [], "all": []},
+    "image": [{"quality": "50x50", "url": "http://c.saavncdn.com/x-50x50.jpg"}, {"quality": "500x500", "url": "https://c.saavncdn.com/x-500x500.jpg"}],
+    "downloadUrl": [{"quality": "96kbps", "url": "https://aac.saavncdn.com/a_96.mp4"},
+                    {"quality": "160kbps", "url": "http://aac.saavncdn.com/a_160.mp4"},
+                    {"quality": "320kbps", "url": "https://aac.saavncdn.com/a_320.mp4"}],
+}
+
+
+class MusicTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        import importlib
+        import nox
         sys.modules.pop("nox.music", None)
-        sys.modules.setdefault("httpx", types.ModuleType("httpx"))
-        from nox import music
-        d = music.normalize({"id": 1, "title": "Song", "artist": {"name": "Art"}, "duration": 200,
-                             "album": {"cover_big": "https://c.example.com/x.jpg"}, "preview": "https://p.example.com/p.mp3"}, "deezer")
-        self.assertEqual((d["title"], d["artist"], d["dur"]), ("Song", "Art", 200))
-        i = music.normalize({"trackName": "T", "artistName": "A", "trackTimeMillis": 215000,
-                             "artworkUrl100": "https://a.example.com/100x100bb.jpg"}, "itunes")
-        self.assertEqual((i["dur"], i["cover"].endswith("600x600bb.jpg")), (215, True))
-        self.assertEqual(music._secs("4.7 min"), 282)
-        self.assertEqual(music._secs("4:42"), 282)
+        if hasattr(nox, "music"):
+            delattr(nox, "music")
+        sys.modules.setdefault("httpx", types.ModuleType("httpx"))      # network is never touched in these tests
+        music = importlib.import_module("nox.music")        # the real module, not the fake used by the room tests
+        self.music = music
+        music.clear_caches()
+
+    def test_song_parsing(self):
+        m = self.music
+        s = m.song(SAMPLE_SONG)
+        self.assertEqual(s["title"], 'Kesariya (From "Brahmastra")')           # HTML entities cleaned
+        self.assertEqual(s["artist"], "Arijit Singh, Pritam")
+        self.assertEqual((s["dur"], s["album"], s["sid"]), (268, "Brahmastra", "3IoDK8qI"))
+        self.assertTrue(s["cover"].endswith("500x500.jpg"))
+        self.assertEqual(m.pick_url(s), "https://aac.saavncdn.com/a_160.mp4")   # 160 kbps preferred, http upgraded to https
+        self.assertEqual(m.pick_url(s, 320), "https://aac.saavncdn.com/a_320.mp4")
+        self.assertEqual(m.pick_url(s, 12), "https://aac.saavncdn.com/a_96.mp4")  # nothing lower: closest above
+        self.assertIsNone(m.song({"id": "1"}))
+        self.assertIsNone(m.song("nope"))
+
+    async def test_search_and_artists(self):
+        m = self.music
+        calls = []
+
+        async def fake_api(name, path, params=None, base=None, timeout=7.0):
+            calls.append(path)
+            if path == "/search/songs":
+                return {"success": True, "data": {"results": [SAMPLE_SONG, SAMPLE_SONG]}}      # duplicate gets removed
+            if path == "/search/artists":
+                return {"success": True, "data": {"results": [{"id": "9", "name": "Arijit Singh", "image": [{"quality": "150x150", "url": "https://c.saavncdn.com/a-150x150.jpg"}]}]}}
+            return None
+        m._api = fake_api
+        songs, artists = await m.search_all("arijit singh", 10, 4)
+        self.assertEqual(len(songs), 1)
+        self.assertEqual(artists[0]["name"], "Arijit Singh")
+        self.assertTrue(artists[0]["cover"].endswith("500x500.jpg"))
+        await m.search_all("arijit singh", 10, 4)                                          # second call comes from cache
+        self.assertEqual(len(calls), 2)
+        tok = m.stash(7, songs)[0]["token"]
+        self.assertIsNone(m.take(tok, 8))                                                  # other users cannot use my token
+        self.assertEqual(m.take(tok, 7)["sid"], "3IoDK8qI")
+        r = await m.resolve(songs[0])
+        self.assertTrue(r["url"].startswith("https://aac.saavncdn.com/"))
+
+    async def test_fallback_global_search(self):
+        m = self.music
+
+        async def fake_api(name, path, params=None, base=None, timeout=7.0):
+            if path == "/search":
+                return {"success": True, "data": {"songs": {"results": [SAMPLE_SONG]}}}
+            return {"success": False}
+        m._api = fake_api
+        songs, _ = await m.search_all("anything", 5, 0)
+        self.assertEqual(len(songs), 1)
+
+
+class AutoplayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_autoplay_refills_queue(self):
+        import nox
+        fake = types.ModuleType("nox.music")
+
+        async def resolve(t):
+            return {"url": "https://cdn.example.com/" + t["title"] + ".mp3", "preview": False}
+
+        async def related(track, exclude=()):
+            return [{"id": "r1", "title": "similar", "artist": "x", "dur": 100, "cover": None}]
+        fake.resolve, fake.related = resolve, related
+        nox.music = fake
+        sys.modules["nox.music"] = fake
+        from nox.rooms import Manager
+        room = Manager().get(-200)
+        await room.toggle_autoplay()
+        room.add({"id": "a", "title": "one", "artist": "x", "dur": 100, "by": "u", "src": "g"})
+        for _ in range(10):
+            await asyncio.sleep(0)
+        await room.skip()                                            # queue is empty -> autoplay picks a similar song
+        for _ in range(10):
+            await asyncio.sleep(0)
+        self.assertEqual(room.cur["title"], "similar")
+        self.assertEqual(room.cur["src"], "auto")
 
 
 if __name__ == "__main__":

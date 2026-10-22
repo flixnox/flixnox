@@ -25,5 +25,3 @@ services:
         sync: false
       - key: MONGO_URI
         sync: false
-      - key: CURIOUS_API_KEY
-        sync: false

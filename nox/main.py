@@ -1,5 +1,6 @@
 """FastAPI app: Telegram webhook, Mini App files and the room WebSocket. Every route sits behind the proxy secret."""
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -9,7 +10,8 @@ from pathlib import Path
 from aiogram import Dispatcher
 from aiogram.types import (BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats, Update)
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
+from starlette.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from . import admin, broadcast, config, handlers, music, security, state
@@ -20,6 +22,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 log = logging.getLogger("nox")
 WEB = Path(__file__).resolve().parent.parent / "webapp"
 dp = Dispatcher()
+_h = hashlib.md5()
+for _f in sorted((WEB / "static").glob("*")):
+    _h.update(_f.read_bytes())
+ASSET_V = _h.hexdigest()[:10]                                           # changes whenever the UI files change
+INDEX_HTML = (WEB / "index.html").read_text(encoding="utf-8").replace("__V__", ASSET_V)
 dp.include_router(admin.router)       # owner panel first
 dp.include_router(handlers.router)
 _tasks = set()
@@ -49,7 +56,7 @@ async def lifespan(app):
         await bot.set_my_commands([BotCommand(command=c, description=d) for c, d in (
             ("start", "Open the room (admins)"), ("play", "Add a song"), ("queue", "Show the queue"),
             ("skip", "Skip song (admins)"), ("pause", "Pause (admins)"), ("resume", "Resume (admins)"),
-            ("loop", "Toggle loop (admins)"), ("shuffle", "Shuffle queue (admins)"), ("clear", "Clear queue (admins)"),
+            ("loop", "Toggle loop (admins)"), ("autoplay", "Toggle autoplay (admins)"), ("join", "Get the join button"), ("shuffle", "Shuffle queue (admins)"), ("clear", "Clear queue (admins)"),
             ("end", "Stop the room (admins)"), ("settings", "Group settings (admins)"), ("help", "How it works"))],
             scope=BotCommandScopeAllGroupChats())
         await bot.set_my_short_description("Live listening rooms for your Telegram group.")
@@ -69,6 +76,7 @@ async def lifespan(app):
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app.add_middleware(GZipMiddleware, minimum_size=500)                  # smaller downloads = faster Mini App
 
 
 @app.middleware("http")
@@ -82,14 +90,16 @@ async def shield(request: Request, call_next):
     resp = await call_next(request)
     for k, v in SEC_HEADERS.items():
         resp.headers[k] = v
-    if "cache-control" not in resp.headers:
+    if request.url.path.startswith("/static/"):
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"   # files are versioned with ?v=
+    elif "cache-control" not in resp.headers:
         resp.headers["Cache-Control"] = "no-store"
     return resp
 
 
 @app.get("/")
 async def index():
-    return FileResponse(WEB / "index.html")
+    return HTMLResponse(INDEX_HTML)
 
 
 @app.get("/health")
@@ -238,8 +248,10 @@ async def handle(t, js, room, client, chat_id, uid, name):
         if not search_rl.allow(uid):
             return await send({"t": "err", "m": "Searching too fast. Wait a second."})
         q = clean_text(js.get("q"), 80)
-        items = music.stash(uid, await music.search(q)) if len(q) >= 2 else []
-        return await send({"t": "results", "q": q, "items": items})
+        by_artist = bool(js.get("artist"))
+        songs, artists = await music.search_all(q, 20 if by_artist else 12, 0 if by_artist else 6) if len(q) >= 2 else ([], [])
+        rid = js.get("id")
+        return await send({"t": "results", "id": rid if isinstance(rid, int) else None, "q": q, "artist": by_artist, "items": music.stash(uid, songs), "artists": artists})
 
     if t == "add":
         g = store.group(chat_id)
@@ -263,7 +275,7 @@ async def handle(t, js, room, client, chat_id, uid, name):
         txt = await music.lyrics(cur["artist"], cur["title"])
         return await send({"t": "lyrics", "title": cur["title"], "text": txt})
 
-    if t in ("skip", "pause", "resume", "loop", "shuffle", "clear", "remove", "end"):
+    if t in ("skip", "pause", "resume", "loop", "autoplay", "shuffle", "clear", "remove", "end"):
         if not await state.is_admin(chat_id, uid):
             return await send({"t": "err", "m": "Only group admins can do this."})
         if t == "skip":
@@ -274,6 +286,8 @@ async def handle(t, js, room, client, chat_id, uid, name):
             await room.resume()
         elif t == "loop":
             await room.toggle_loop()
+        elif t == "autoplay":
+            await room.toggle_autoplay()
         elif t == "shuffle":
             await room.shuffle()
         elif t == "clear":

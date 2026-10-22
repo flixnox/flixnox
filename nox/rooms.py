@@ -2,10 +2,11 @@
 import asyncio
 import random
 import time
+from collections import deque
 
 from . import config
 
-PUB = ("title", "artist", "dur", "cover", "by", "src")
+PUB = ("title", "artist", "dur", "cover", "by", "src", "album")
 
 
 def pub(t):
@@ -17,7 +18,8 @@ class Room:
         self.chat_id, self.mgr = chat_id, mgr
         self.queue, self.cur, self.url, self.preview = [], None, None, False
         self.pos0, self.t0 = 0.0, time.time()
-        self.paused = self.auto_paused = self.loop = False
+        self.paused = self.auto_paused = self.loop = self.autoplay = False
+        self.played = deque(maxlen=60)
         self.seq = 0
         self.clients = {}                 # user_id -> client
         self.lock = asyncio.Lock()
@@ -31,7 +33,9 @@ class Room:
         return self.pos0 if self.paused else self.pos0 + (time.time() - self.t0)
 
     def state(self):
-        return {"t": "state", "seq": self.seq, "track": pub(self.cur) if self.cur else None,
+        from . import music
+        nxt = music.pick_url(self.queue[0]) if self.queue and hasattr(music, "pick_url") else None
+        return {"t": "state", "nxt": nxt, "auto": self.autoplay, "seq": self.seq, "track": pub(self.cur) if self.cur else None,
                 "url": self.url if self.cur else None, "preview": self.preview,
                 "pos": round(self.position(), 2), "paused": self.paused, "st": time.time(),
                 "loop": self.loop, "queue": [pub(x) for x in self.queue[:50]], "qn": len(self.queue),
@@ -93,6 +97,13 @@ class Room:
         """Move to the next playable track. Caller must hold the lock."""
         from . import music
         self._cancel_wd()
+        if not self.queue and self.autoplay and self.cur is not None and hasattr(music, "related"):
+            try:
+                for t in (await asyncio.wait_for(music.related(self.cur, set(self.played)), 12))[:3]:
+                    t.update(by="Autoplay", by_id=0, src="auto")
+                    self.queue.append(t)
+            except Exception:
+                pass
         for _ in range(6):
             if not self.queue:
                 break
@@ -103,6 +114,7 @@ class Room:
                 r = None
             if r:
                 self.cur, self.url, self.preview = t, r["url"], r["preview"]
+                self.played.append(t.get("id"))
                 self.pos0, self.t0, self.paused, self.auto_paused = 0.0, time.time(), False, False
                 self.seq += 1
                 self.ended_votes, self.bad_votes, self.durs = set(), set(), {}
@@ -155,6 +167,11 @@ class Room:
         self.loop = not self.loop
         await self.push()
         return self.loop
+
+    async def toggle_autoplay(self):
+        self.autoplay = not self.autoplay
+        await self.push()
+        return self.autoplay
 
     async def end(self):
         async with self.lock:

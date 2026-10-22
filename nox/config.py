@@ -22,9 +22,11 @@ WEBHOOK_SECRET = _env("WEBHOOK_SECRET", required=True)           # any long rand
 OWNER_IDS = {int(x) for x in _env("OWNER_IDS", required=True).replace(" ", "").split(",") if x.isdigit()}
 MONGO_URI = _env("MONGO_URI")
 MONGO_DB = _env("MONGO_DB", "noxroom")
-API_BASE = _env("API_BASE", "https://curiousapis.name.ng").rstrip("/")
-SC_SEARCH_PATH = _env("SC_SEARCH_PATH", "/soundcloud/search")
 SUPPORT_URL = _env("SUPPORT_URL")
+# Music source: JioSaavn API. The default works out of the box, so no env variable is needed on Render.
+JIOSAAVN_BASE = _env("JIOSAAVN_BASE", "https://jiosaavn-api-ruddy-phi.vercel.app/api").rstrip("/")
+LYRICS_BASE = _env("LYRICS_BASE", "https://api.lyrics.ovh/v1").rstrip("/")
+AUDIO_KBPS = int(_env("AUDIO_KBPS", "160"))                      # 96 / 160 / 320 (160 starts fastest on mobile data)
 MAX_QUEUE = int(_env("MAX_QUEUE", "500"))                        # invisible safety cap, not a user limit
 
 if not OWNER_IDS:
@@ -46,4 +48,3 @@ def _derive(label):
 
 WEBHOOK_PATH = _derive("path")[:40]     # secret URL path
 WEBHOOK_TOKEN = _derive("token")        # secret header Telegram sends with every update
-CURIOUS_API_KEY = _env("CURIOUS_API_KEY", "")
