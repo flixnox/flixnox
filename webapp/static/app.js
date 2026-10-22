@@ -40,6 +40,7 @@
   }
   function fatal(msg) {
     dead = true; $("fatalmsg").textContent = msg; $("fatal").hidden = false;
+    try { if (tg && tg.disableClosingConfirmation) tg.disableClosingConfirmation(); } catch (e) {}
     try { if (ws) ws.close(); } catch (e) {}
     au.pause();
   }
@@ -52,6 +53,7 @@
     if (tg.setBackgroundColor) tg.setBackgroundColor("#f4f8ff");
     if (tg.setBottomBarColor) tg.setBottomBarColor("#f4f8ff");
     tg.BackButton.show(); tg.BackButton.onClick(goBack);
+    if (tg.enableClosingConfirmation) tg.enableClosingConfirmation();      // a stray swipe or back can't drop you out of the room
   } catch (e) {}
 
   // ---------- sheets ----------
@@ -84,8 +86,10 @@
     hap();
     confirmSheet("Leave the room?", "Music stops on your phone. The room keeps playing for everyone else, and you can rejoin any time.", "Leave", "c-rose", leave, "Stay");
   }
-  function goBack() { if (!$("sheet").hidden) closeSheet(); else if (tab !== "now") setTab("now"); else askLeave(); }
+  function goBack() { if (dead) return leave(); if (!$("sheet").hidden) closeSheet(); else if (tab !== "now") setTab("now"); else askLeave(); }
   $("back").onclick = goBack;
+  $("fclose").onclick = leave;
+  $("fretry").onclick = () => location.reload();
 
   // ---------- invite ----------
   $("inv").onclick = () => {
