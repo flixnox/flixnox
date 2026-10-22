@@ -41,24 +41,40 @@ def join_url(chat_id):
     return f"https://t.me/{config.BOT_USERNAME}/{config.MINIAPP_SHORT}?startapp={encode_room(chat_id)}&mode=compact"
 
 
+def cut(text, n):
+    """Shorten without breaking words badly; always safe to escape afterwards."""
+    text = str(text or "")
+    return text if len(text) <= n else text[: n - 1].rstrip() + "…"
+
+
+def _code(s):
+    return f"<code>{s}</code>"
+
+
 WELCOME = (
-    "✨ <b>" + sc("welcome to sonic nox") + "</b> ✨\n\n"
-    "Hey {name}! I turn your group into a <b>live listening room</b>, so everyone hears the same song at the same time.\n\n"
-    "<blockquote>1️⃣ Add me to a group and make me admin\n"
-    "2️⃣ Send /start there to open the room\n"
-    "3️⃣ Queue songs with <code>/play song name</code></blockquote>"
+    "🎧 <b>" + sc("sonic nox") + "</b>\n"
+    "<i>" + sc("live listening rooms for your group") + "</i>\n\n"
+    "Hey <b>{name}</b>! I turn any group into a live room, so everyone hears the same song at the same moment.\n\n"
+    "<blockquote>1️⃣  Add me to your group as admin\n"
+    "2️⃣  Send /start there to open the room\n"
+    "3️⃣  Queue songs with <code>/play song name</code></blockquote>\n"
+    "Tap <b>" + sc("add to group") + "</b> to begin 👇"
 )
 HELP = (
     "📖 <b>" + sc("how it works") + "</b>\n"
     "<blockquote>1. Add me to your group and make me admin (Pin messages).\n"
-    "2. An admin sends /start and I post the room message.\n"
-    "3. Anyone adds songs with <code>/play song name</code> or from the room itself.\n"
-    "4. Tap <b>Join Room</b> to listen together.</blockquote>\n"
-    "🎛 <b>" + sc("commands") + "</b>\n"
-    "/play, /queue, /settings\n"
-    "<i>Admins:</i> /skip, /pause, /resume, /loop, /shuffle, /autoplay, /clear, /end"
+    "2. An admin sends /start and I post the room.\n"
+    "3. Anyone adds songs with <code>/play song name</code>.\n"
+    "4. Tap <b>" + sc("join room") + "</b> to listen together.</blockquote>\n"
+    "🎵 <b>" + sc("everyone") + "</b>\n"
+    "/play · /queue · /invite · /join · /help\n\n"
+    "🛡 <b>" + sc("admins") + "</b>\n"
+    "/skip · /pause · /resume · /loop · /shuffle\n"
+    "/autoplay · /clear · /end · /settings\n\n"
+    "<i>Tip: reply to a friend's message with /invite to call them into the room.</i>"
 )
-THANKS = ("🎉 <b>" + sc("thanks for adding me") + "</b>\nMake me an admin with \"Pin messages\", then send /start to open the room.")
+THANKS = ("🎉 <b>" + sc("thanks for adding me") + "</b>\n"
+          "<blockquote>Make me an admin with \"Pin messages\", then send /start to open the room.</blockquote>")
 
 
 def welcome_kb():
@@ -71,56 +87,104 @@ def welcome_kb():
 
 def panel_kb(chat_id, room=None):
     paused = bool(room and room.paused)
+    loop_on = bool(room and room.loop)
+    auto_on = bool(room and room.autoplay)
     return kb(
         [btn("🎧 Join Room", url=join_url(chat_id), style=P)],
         [btn("▶ Resume" if paused else "⏸ Pause", cb="pp", style=S), btn("⏭ Skip", cb="sk", style=P)],
-        [btn("📜 Queue", cb="q", style=P), btn("🔁 Loop", cb="lp", style=S), btn("🔀 Shuffle", cb="sh", style=P)],
-        [btn("♾ Autoplay", cb="ap", style=S), btn("⚙ Settings", cb="st", style=P)],
+        [btn("📜 Queue", cb="q", style=P), btn("🔁 Loop", cb="lp", style=S if loop_on else P), btn("🔀 Shuffle", cb="sh", style=P)],
+        [btn("♾ Auto", cb="ap", style=S if auto_on else P), btn("📨 Invite", cb="inv", style=S), btn("⚙ Settings", cb="st", style=P)],
     )
+
+
+def join_kb(chat_id, label="🎧 Join Room"):
+    return kb([btn(label, url=join_url(chat_id), style=P)])
+
+
+_HINT = "💡 " + _code("/play song name")
 
 
 def panel_caption(room):
     if room is None or room.cur is None:
-        return (f"🎧 <b>{sc('nox room')}</b>  ⚪ <i>{sc('idle')}</i>\n\n"
+        return (f"🎧 <b>{sc('nox room')}</b>  •  ⚪ <i>{sc('idle')}</i>\n\n"
                 "Nothing is playing yet.\n"
-                f"Add a song with <code>/play song name</code>, then tap <b>{sc('join room')}</b>.")
+                f"Queue a song, then tap <b>{sc('join room')}</b> to listen together.\n\n"
+                f"{_HINT}")
     t = room.cur
-    live = "🟢" if not room.paused else "⏸"
-    lines = [f"🎧 <b>{sc('nox room')}</b>  {live} <i>{sc('live' if not room.paused else 'paused')}</i>\n",
-             f"▶ <b>{esc(t['title'][:70])}</b>",
-             f"<i>{esc(t['artist'][:50])}</i> • {mmss(t.get('dur'))}",
-             f"👤 {sc('by')} {esc(str(t.get('by') or 'someone')[:28])}  •  🎧 {len(room.clients)} {sc('listening')}"
-             + ("  •  🔁" if room.loop else "") + ("  •  ♾" if room.autoplay else "")]
-    if room.queue:
-        q = [f"<b>{sc('up next')}</b>"]
-        for i, x in enumerate(room.queue[:4], 1):
-            q.append(f"{i}. {esc(x['title'][:40])} — {esc(x['artist'][:22])}")
-        if len(room.queue) > 4:
-            q.append(f"+{len(room.queue) - 4} more")
-        lines.append("<blockquote>" + "\n".join(q) + "</blockquote>")
-    lines.append("💡 <code>/play song name</code>")
-    text = "\n".join(lines)
-    return text if len(text) <= 1000 else text[:990] + "…"
+    paused = bool(room.paused)
+    status = f"⏸ <i>{sc('paused')}</i>" if paused else f"🟢 <i>{sc('live')}</i>"
+    flags = []
+    if room.loop:
+        flags.append(f"🔁 {sc('loop')}")
+    if room.autoplay:
+        flags.append(f"♾ {sc('auto')}")
+    stats = f"🎧 {len(room.clients)} {sc('listening')}" + ("  ·  " + "  ·  ".join(flags) if flags else "")
+
+    def build(n_queue):
+        parts = [f"🎧 <b>{sc('nox room')}</b>  •  {status}", "",
+                 f"{'⏸' if paused else '▶️'} <b>{esc(cut(t.get('title'), 70))}</b>",
+                 f"<i>{esc(cut(t.get('artist'), 50))}</i>  ·  {mmss(t.get('dur'))}", "",
+                 f"👤 {sc('added by')} <b>{esc(cut(t.get('by') or 'someone', 28))}</b>",
+                 stats]
+        if room.queue and n_queue:
+            q = [f"<b>{sc('up next')}</b>"]
+            for i, x in enumerate(room.queue[:n_queue], 1):
+                q.append(f"{i}. {esc(cut(x.get('title'), 38))} — <i>{esc(cut(x.get('artist'), 22))}</i>")
+            more = len(room.queue) - n_queue
+            if more > 0:
+                q.append(f"+{more} {sc('more')}")
+            parts += ["", "<blockquote>" + "\n".join(q) + "</blockquote>"]
+        parts += ["", _HINT]
+        return "\n".join(parts)
+
+    for n in (4, 3, 2, 1, 0):                  # drop queue lines (never cut HTML in half) if too long
+        text = build(n)
+        if len(text) <= 1000:
+            return text
+    return text
+
+
+def added_text(t, pos, by=None):
+    head = f"▶️ <b>{sc('starting now')}</b>" if pos == "start" else f"➕ <b>{sc('added to queue')}</b>  ·  #{pos}"
+    out = [head, "", f"<b>{esc(cut(t.get('title'), 70))}</b>",
+           f"<i>{esc(cut(t.get('artist'), 40))}</i>  ·  {mmss(t.get('dur'))}"]
+    if by:
+        out += ["", f"👤 {sc('added by')} <b>{esc(cut(by, 28))}</b>"]
+    out += ["", f"Tap <b>{sc('join room')}</b> to listen 👇"]
+    return "\n".join(out)
+
+
+def invite_text(name, target=None, track=None):
+    who = f"<b>{esc(cut(name, 28))}</b>"
+    line = f"{who} is listening and wants you to join." if not target else f"{who} invited {target} to listen together."
+    out = [f"📨 <b>{sc('room invite')}</b>", "", line]
+    if track:
+        out += ["", f"▶️ <b>{esc(cut(track.get('title'), 50))}</b>", f"<i>{esc(cut(track.get('artist'), 36))}</i>"]
+    out += ["", f"Tap <b>{sc('join room')}</b> 👇"]
+    return "\n".join(out)
 
 
 def queue_text(room):
     if room is None or (room.cur is None and not room.queue):
-        return "🫥 The queue is empty. Add a song with <code>/play song name</code>."
-    out = [f"🎶 <b>{sc('queue')}</b>"]
+        return f"🎶 <b>{sc('queue')}</b>\n\nIt's quiet here. Add a song with {_code('/play song name')}."
+    total = len(room.queue) + (1 if room.cur else 0)
+    out = [f"🎶 <b>{sc('queue')}</b>  •  {total} {sc('tracks')}", ""]
     if room.cur:
-        out.append(f"▶ <b>{esc(room.cur['title'][:70])}</b> — {esc(room.cur['artist'][:40])}")
-    rows = [f"{i}. {esc(q['title'][:55])} — {esc(q['artist'][:30])}" for i, q in enumerate(room.queue[:15], 1)]
+        out += [f"{'⏸' if room.paused else '▶️'} <b>{sc('now playing')}</b>",
+                f"<b>{esc(cut(room.cur.get('title'), 60))}</b> — <i>{esc(cut(room.cur.get('artist'), 36))}</i>", ""]
+    rows = [f"{i}. {esc(cut(q.get('title'), 50))} — <i>{esc(cut(q.get('artist'), 28))}</i>" for i, q in enumerate(room.queue[:15], 1)]
     if rows:
         out.append("<blockquote>" + "\n".join(rows) + "</blockquote>")
     if len(room.queue) > 15:
-        out.append(f"+{len(room.queue) - 15} more")
+        out.append(f"+{len(room.queue) - 15} {sc('more')}")
     return "\n".join(out)
 
 
 def settings_text(g):
+    everyone = g["play"] == "all"
     return (f"⚙️ <b>{sc('group settings')}</b>\n\n"
-            f"🎵 {sc('who can use /play')}: <b>{'Everyone' if g['play'] == 'all' else 'Admins only'}</b>\n"
-            f"🧹 {sc('delete command messages')}: <b>{'On' if g['autodel'] else 'Off'}</b>")
+            f"🎵 {sc('who can /play')}\n<b>{'Everyone' if everyone else 'Admins only'}</b>\n\n"
+            f"🧹 {sc('auto-delete commands')}\n<b>{'On' if g['autodel'] else 'Off'}</b>")
 
 
 def settings_kb(g):

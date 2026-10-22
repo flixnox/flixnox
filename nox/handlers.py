@@ -1,6 +1,7 @@
 """Chat commands and buttons (private chat + groups). Every button press is always answered, so nothing feels dead."""
 import asyncio
 import logging
+import time
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
@@ -210,7 +211,7 @@ async def cmd_join(m: Message):
         return
     if not store.group(m.chat.id)["panel"]:
         return await m.reply("The room isn't open yet. Ask an admin to send /start first.")
-    await m.reply("🎧 <b>" + ui.sc("tap to join the room") + "</b>", reply_markup=ui.kb([ui.btn("🎧 Join Room", url=ui.join_url(m.chat.id))]))
+    await m.reply("🎧 <b>" + ui.sc("tap to join the room") + "</b>", reply_markup=ui.join_kb(m.chat.id))
 
 
 @router.message(Command("play"), F.chat.type.in_(GROUPS))
@@ -237,8 +238,7 @@ async def cmd_play(m: Message, command: CommandObject):
     pos = room.add(t)
     if pos is None:
         return await m.reply("The queue is full right now.")
-    label = "▶ " + ui.sc("starting now") if pos == "start" else f"➕ {ui.sc('added at')} #{pos}"
-    await m.reply(f"{label}\n<b>{ui.esc(t['title'][:70])}</b> — <i>{ui.esc(t['artist'][:40])}</i> • {ui.mmss(t['dur'])}\nTap <b>{ui.sc('join room')}</b> on the pinned message to listen.")
+    await m.reply(ui.added_text(t, pos, t["by"]), reply_markup=ui.join_kb(m.chat.id))
     await _autodel(m)
 
 
@@ -246,6 +246,52 @@ async def cmd_play(m: Message, command: CommandObject):
 async def cmd_queue(m: Message):
     if await guard(m):
         await m.reply(ui.queue_text(rooms.get(m.chat.id, create=False)))
+
+
+# ---------------- invite: anyone in the room can call the rest of the group ----------------
+_inv_last = {}             # chat_id -> monotonic time of the last invite (stops spam)
+INVITE_COOLDOWN = 90
+
+
+async def _send_invite(chat, user, target=None):
+    """Posts one invite message with a Join Room button. Returns the message, or None when on cooldown."""
+    now = time.monotonic()
+    if now - _inv_last.get(chat.id, -1e9) < INVITE_COOLDOWN:
+        return None
+    _inv_last[chat.id] = now
+    room = rooms.get(chat.id, create=False)
+    name = clean_text(user.first_name or "Someone", 30)
+    msg = await bot.send_message(chat.id, ui.invite_text(name, target, room.cur if room else None),
+                                 reply_markup=ui.join_kb(chat.id))
+    _temp(msg, 300)
+    return msg
+
+
+@router.message(Command("invite"), F.chat.type.in_(GROUPS))
+async def cmd_invite(m: Message):
+    if not await guard(m):
+        return
+    if not store.group(m.chat.id)["panel"]:
+        return await m.reply("The room isn't open yet. Ask an admin to send /start first.")
+    target = None
+    rp = m.reply_to_message
+    if rp and rp.from_user and not rp.from_user.is_bot and rp.from_user.id != m.from_user.id:
+        target = f'<a href="tg://user?id={rp.from_user.id}">{ui.esc(clean_text(rp.from_user.first_name or "friend", 30))}</a>'
+    if await _send_invite(m.chat, m.from_user, target) is None:
+        _temp(await m.reply("📨 An invite was just sent. Please wait a moment before sending another."), 15)
+    await _autodel(m)
+
+
+@router.callback_query(F.data == "inv")
+async def cb_invite(cb: CallbackQuery):
+    if not await guard_cb(cb):
+        return
+    chat = cb.message.chat
+    if chat.type not in GROUPS:
+        return await cb.answer()
+    if await _send_invite(chat, cb.from_user) is None:
+        return await cb.answer("📨 An invite was just sent. Try again in a minute.", show_alert=True)
+    await cb.answer("📨 Invite sent to the group")
 
 
 # ---------------- group: admin controls ----------------

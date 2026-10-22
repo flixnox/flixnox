@@ -54,7 +54,7 @@ async def lifespan(app):
                                    BotCommand(command="help", description="How it works")],
                                   scope=BotCommandScopeAllPrivateChats())
         await bot.set_my_commands([BotCommand(command=c, description=d) for c, d in (
-            ("start", "Open the room (admins)"), ("play", "Add a song"), ("queue", "Show the queue"),
+            ("start", "Open the room (admins)"), ("play", "Add a song"), ("queue", "Show the queue"), ("invite", "Invite the group to the room"),
             ("skip", "Skip song (admins)"), ("pause", "Pause (admins)"), ("resume", "Resume (admins)"),
             ("loop", "Toggle loop (admins)"), ("autoplay", "Toggle autoplay (admins)"), ("join", "Get the join button"), ("shuffle", "Shuffle queue (admins)"), ("clear", "Clear queue (admins)"),
             ("end", "Stop the room (admins)"), ("settings", "Group settings (admins)"), ("help", "How it works"))],

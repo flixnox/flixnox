@@ -3,7 +3,7 @@ services:
     name: sonic-nox
     runtime: python
     plan: free
-    buildCommand: apt-get update && apt-get install -y ffmpeg && pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt
     startCommand: uvicorn nox.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips="*" --no-server-header --workers 1
     healthCheckPath: /healthz
     envVars:
