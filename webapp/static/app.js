@@ -8,7 +8,7 @@
   const TAGS = [["Arijit Singh", "c-blue"], ["Lo-fi chill", "c-violet"], ["Punjabi hits", "c-mint"], ["Shreya Ghoshal", "c-sky"],
     ["Taylor Swift", "c-amber"], ["Diljit Dosanjh", "c-teal"], ["Old is gold", "c-violet"], ["Gym workout", "c-blue"]];
 
-  let ws = null, st = null, admin = false, off = 0, bestRtt = 1e9, localOff = false;
+  let ws = null, st = null, admin = false, roomLink = "", off = 0, bestRtt = 1e9, localOff = false;
   let closing = false, dead = false, backoff = 1000, hb = null, tab = "now", searchTimer = null;
   let reqId = 0, lastReq = null, badSent = -1, nxtUrl = "", lyrOpen = false, qsig = "", lastCover = "", hinted = false;
   const cache = new Map(), pending = [];
@@ -86,6 +86,25 @@
   }
   function goBack() { if (!$("sheet").hidden) closeSheet(); else if (tab !== "now") setTab("now"); else askLeave(); }
   $("back").onclick = goBack;
+
+  // ---------- invite ----------
+  $("inv").onclick = () => {
+    hap();
+    sheet((c) => {
+      c.appendChild(h("h3", null, "Invite to the room"));
+      c.appendChild(h("p", null, "Ping the whole group with a Join button, or share the room link with someone in this group."));
+      const b = h("div", "btns"), grp = h("button", "bx c-blue", "Notify group"), shr = h("button", "bx c-teal", "Share link");
+      grp.onclick = () => { closeSheet(); if (!send({ t: "invite" })) toast("Reconnecting… try again", "err"); };
+      shr.onclick = () => {
+        closeSheet();
+        if (!roomLink) return toast("Link isn't ready yet. Try again.", "err");
+        const u = "https://t.me/share/url?url=" + encodeURIComponent(roomLink) + "&text=" + encodeURIComponent("Join me in the Nox Room \uD83C\uDFA7");
+        try { if (tg && tg.openTelegramLink) return tg.openTelegramLink(u); } catch (e) {}
+        window.open(u, "_blank");
+      };
+      b.append(grp, shr); c.appendChild(b);
+    });
+  };
 
   // ---------- tabs ----------
   function setTab(n) {
@@ -350,7 +369,7 @@
   function handle(m) {
     switch (m.t) {
       case "hello":
-        admin = !!m.admin; backoff = 1000; setConn(""); $("room").textContent = m.room || "live room";
+        admin = !!m.admin; roomLink = m.link || ""; backoff = 1000; setConn(""); $("room").textContent = m.room || "live room";
         clearInterval(hb); send({ t: "ping", c: Date.now() });
         setTimeout(() => send({ t: "ping", c: Date.now() }), 600);
         hb = setInterval(() => send({ t: "ping", c: Date.now() }), 20000);

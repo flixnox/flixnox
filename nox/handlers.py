@@ -253,16 +253,20 @@ _inv_last = {}             # chat_id -> monotonic time of the last invite (stops
 INVITE_COOLDOWN = 90
 
 
-async def _send_invite(chat, user, target=None):
-    """Posts one invite message with a Join Room button. Returns the message, or None when on cooldown."""
+async def invite_group(chat_id, name, target=None):
+    """Posts one invite message with a Join Room button. Returns the message, or None when on cooldown.
+    Used by the chat button, /invite and the Mini App (which has already checked membership)."""
     now = time.monotonic()
-    if now - _inv_last.get(chat.id, -1e9) < INVITE_COOLDOWN:
+    if now - _inv_last.get(chat_id, -1e9) < INVITE_COOLDOWN:
         return None
-    _inv_last[chat.id] = now
-    room = rooms.get(chat.id, create=False)
-    name = clean_text(user.first_name or "Someone", 30)
-    msg = await bot.send_message(chat.id, ui.invite_text(name, target, room.cur if room else None),
-                                 reply_markup=ui.join_kb(chat.id))
+    _inv_last[chat_id] = now
+    room = rooms.get(chat_id, create=False)
+    try:
+        msg = await bot.send_message(chat_id, ui.invite_text(clean_text(name or "Someone", 30), target, room.cur if room else None),
+                                     reply_markup=ui.join_kb(chat_id))
+    except TelegramAPIError:
+        _inv_last.pop(chat_id, None)
+        return None
     _temp(msg, 300)
     return msg
 
@@ -277,7 +281,7 @@ async def cmd_invite(m: Message):
     rp = m.reply_to_message
     if rp and rp.from_user and not rp.from_user.is_bot and rp.from_user.id != m.from_user.id:
         target = f'<a href="tg://user?id={rp.from_user.id}">{ui.esc(clean_text(rp.from_user.first_name or "friend", 30))}</a>'
-    if await _send_invite(m.chat, m.from_user, target) is None:
+    if await invite_group(m.chat.id, m.from_user.first_name, target) is None:
         _temp(await m.reply("📨 An invite was just sent. Please wait a moment before sending another."), 15)
     await _autodel(m)
 
@@ -289,7 +293,7 @@ async def cb_invite(cb: CallbackQuery):
     chat = cb.message.chat
     if chat.type not in GROUPS:
         return await cb.answer()
-    if await _send_invite(chat, cb.from_user) is None:
+    if await invite_group(chat.id, cb.from_user.first_name) is None:
         return await cb.answer("📨 An invite was just sent. Try again in a minute.", show_alert=True)
     await cb.answer("📨 Invite sent to the group")
 

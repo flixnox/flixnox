@@ -198,7 +198,8 @@ async def ws_endpoint(ws: WebSocket):
         client = Client(ws, user)
         admin_now = await state.is_admin(chat_id, uid)
         await client.send({"t": "hello", "admin": admin_now, "room": g.get("title", "")[:60],
-                           "me": clean_text(user.get("first_name", ""), 32)})
+                           "me": clean_text(user.get("first_name", ""), 32),
+                           "link": f"https://t.me/{config.BOT_USERNAME}/{config.MINIAPP_SHORT}?startapp={security.encode_room(chat_id)}"})
         await room.join(client)
         name = clean_text(user.get("first_name", "") or "Listener", 30)
 
@@ -243,6 +244,10 @@ async def handle(t, js, room, client, chat_id, uid, name):
         return room.report_dur(uid, seq, js.get("dur"))
     if t == "bad":
         return await room.vote_bad(uid, seq)
+    if t == "invite":                                   # any member in the room may call the rest of the group
+        if await handlers.invite_group(chat_id, name) is None:
+            return await send({"t": "err", "m": "An invite was just sent. Try again in a minute."})
+        return await send({"t": "ok", "m": "Invite sent to the group"})
 
     if t == "search":
         if not search_rl.allow(uid):
