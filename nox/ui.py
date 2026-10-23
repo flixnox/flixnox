@@ -349,21 +349,17 @@ def solo_kb(uid, room=None, audio=False):
 
 
 def results_text(q, items=()):
-    rows = []
-    for i, it in enumerate(items[:8]):
-        rows.append(f"{_NUM[i]} <b>{esc(tc(cut(it['title'], 40)))}</b>  ⏱ {mmss(it.get('dur'))}\n      ╰ 🎤 {esc(sc(cut(it['artist'], 30)))}")
     return "\n".join([head("🔎 <b>" + tc("search results") + "</b>"), DIV, f"🎶 <b>{esc(tc(cut(q, 50)))}</b>", DIV,
-                      "<blockquote>" + "\n".join(rows) + "</blockquote>", DIV,
-                      "👇 <i>" + _sent("tap a number to play it") + "</i>"])
+                      "👇 <i>" + _sent("tap a song to play it") + "</i>"])
 
 
 def results_kb(items, uid):
-    """Numbered buttons, 4 per row, rows alternate blue / green."""
+    """One song per button, in small caps. Rows alternate blue / green."""
     rows = []
-    for k in range(0, min(len(items), 8), 4):
-        st = P if (k // 4) % 2 == 0 else S
-        rows.append([InlineKeyboardButton(text=_NUM[i], callback_data="ps:" + it["token"], style=st)
-                     for i, it in list(enumerate(items[:8]))[k:k + 4]])
+    for i, it in enumerate(items[:8]):
+        artist = str(it.get("artist") or "").split(",")[0].strip()
+        label = f"🎵 {tc(cut(it['title'], 22))} · {sc(cut(artist, 11))}"
+        rows.append([InlineKeyboardButton(text=label, callback_data="ps:" + it["token"], style=P if i % 2 == 0 else S)])
     rows.append([btn("📲 Open Player", url=join_url(uid), style=P if len(rows) % 2 == 0 else S, fill="full")])
     return kb(*rows)
 
