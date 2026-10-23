@@ -36,22 +36,26 @@ class Room:
 
     def state(self):
         from . import music
-        nxt = music.pick_url(self.queue[0]) if self.queue and hasattr(music, "pick_url") else None
+        nxt = None
+        if self.queue:
+            r = self._fresh(self.queue[0])
+            nxt = r["url"] if r and not r.get("preview") else (music.pick_url(self.queue[0]) if hasattr(music, "pick_url") else None)
         return {"t": "state", "nxt": nxt, "auto": self.autoplay, "seq": self.seq, "track": pub(self.cur) if self.cur else None,
                 "url": self.url if self.cur else None, "preview": self.preview,
                 "pos": round(self.position(), 2), "paused": self.paused, "st": time.time(),
                 "loop": self.loop, "queue": [pub(x) for x in self.queue[:50]], "qn": len(self.queue),
                 "n": len(self.clients)}
 
-    async def push(self, only=None):
+    async def push(self, only=None, panel=True):
         self.touched = time.time()
+        self._prefetch()
         msg = self.state()
         targets = [only] if only else list(self.clients.values())
         results = await asyncio.gather(*[c.send(msg) for c in targets], return_exceptions=True)
         for c, ok in zip(targets, results):
             if ok is not True and self.clients.get(c.uid) is c:
                 del self.clients[c.uid]
-        if only is None:
+        if only is None and panel:
             self.mgr.panel_changed(self.chat_id)
 
     # ---- people (voice-chat style participants list) ----
@@ -117,6 +121,35 @@ class Room:
             self._kicking = False
         await self.push()
 
+    # ---- next song is resolved in the background, so a song change is instant (no 5-10 s silence) ----
+    @staticmethod
+    def _fresh(t):
+        r = t.get("_r")
+        return r[0] if r and time.time() - r[1] < 1200 else None
+
+    def _prefetch(self):
+        if self.cur is None or not self.queue:
+            return
+        t = self.queue[0]
+        if self._fresh(t) or t.get("_rp") or time.time() - t.get("_rf", 0) < 60:
+            return
+        t["_rp"] = True
+        self.mgr.spawn(self._pre_resolve(t))
+
+    async def _pre_resolve(self, t):
+        from . import music
+        try:
+            r = await asyncio.wait_for(music.resolve(t), 50)
+            if r:
+                t["_r"] = (r, time.time())
+            else:
+                t["_rf"] = time.time()
+        except Exception:
+            t["_rf"] = time.time()
+        finally:
+            t["_rp"] = False
+        await self.push(panel=False)           # clients can now warm up the exact next URL
+
     async def _advance(self):
         """Move to the next playable track. Caller must hold the lock."""
         from . import music
@@ -133,10 +166,13 @@ class Room:
             if not self.queue:
                 break
             t = self.queue.pop(0)
-            try:
-                r = await asyncio.wait_for(music.resolve(t), 50)
-            except Exception:
-                r = None
+            r = self._fresh(t)
+            if not r:
+                try:
+                    r = await asyncio.wait_for(music.resolve(t), 50)
+                except Exception:
+                    r = None
+            t.pop("_r", None)
             if r:
                 self.cur, self.url, self.preview = t, r["url"], r["preview"]
                 self.played.append(t.get("id"))
@@ -146,6 +182,7 @@ class Room:
                 self.ended_votes, self.bad_votes, self.durs = set(), set(), {}
                 self._arm_wd()
                 self.mgr.on_play(self, t)
+                self._prefetch()
                 return True
             self.mgr.on_fail(self, t)
         self.cur, self.url = None, None

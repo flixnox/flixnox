@@ -1,124 +1,165 @@
+"""Chat commands and buttons (private chat + groups). Every button press is always answered, so nothing feels dead."""
 import asyncio
-from aiogram import Router, F
-from aiogram.types import Message, InputMediaPhoto
-from aiogram.filters import Command
+import logging
+import time
 
-from . import ui, rooms, store, state, admin, security
-from .state import bot
+from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.types import CallbackQuery, ChatMemberUpdated, FSInputFile, InputMediaPhoto, Message
+
+from . import config, music, state, ui
+from .security import clean_text
+from .state import bot, cb_rl, cmd_rl, is_admin, penalty, rooms, store
+
+log = logging.getLogger("handlers")
+router = Router(name="main")
+GROUPS = {"group", "supergroup"}
+_banner_id = None
 
 
-router = Router()
+# ---------------- guards ----------------
+async def _allowed(uid, chat, reply=None):
+    if uid in config.OWNER_IDS:
+        return True
+    if store.get_kv("maint", False):
+        if reply and chat.type == "private":
+            await reply("🛠 Sonic Nox is under maintenance. Please try again soon.")
+        return False
+    if store.is_banned("u", uid) or (chat.id < 0 and store.is_banned("g", chat.id)) or penalty.blocked(uid):
+        return False
+    if not cmd_rl.allow(uid):
+        penalty.strike(uid)
+        return False
+    return True
 
 
-# Welcome command with spoiler banner + buttons
-@router.message(Command("start"))
-async def cmd_start(m: Message):
-    """Welcome message with spoiler image and update/developer buttons"""
-    
-    welcome_text = ui.welcome_text()
-    keyboard = ui.welcome_kb()
-    
-    # Banner image URL (configure in config)
-    banner_url = "https://i.pinimg.com/564x/placeholder.jpg"  # Replace with actual
-    
+async def guard(m: Message):
+    return bool(m.from_user) and await _allowed(m.from_user.id, m.chat, m.answer)
+
+
+async def guard_cb(cb: CallbackQuery):
+    """Always answers the tap when it refuses, so the button never spins forever."""
+    uid = cb.from_user.id
+    if not cb.message:
+        await cb.answer("This message is too old. Send /start again.", show_alert=True)
+        return False
+    if uid in config.OWNER_IDS:
+        return True
+    if store.get_kv("maint", False):
+        await cb.answer("🛠 Under maintenance. Try again soon.", show_alert=True)
+        return False
+    if store.is_banned("u", uid) or (cb.message.chat.id < 0 and store.is_banned("g", cb.message.chat.id)):
+        await cb.answer()
+        return False
+    if not cb_rl.allow(uid):
+        await cb.answer("Easy there, one moment…")
+        return False
+    return True
+
+
+async def admin_of(m: Message):
+    if m.sender_chat and m.sender_chat.id == m.chat.id:      # anonymous admin
+        return True
+    return bool(m.from_user) and await is_admin(m.chat.id, m.from_user.id)
+
+
+async def _autodel(m: Message):
+    if store.group(m.chat.id)["autodel"]:
+        try:
+            await m.delete()
+        except TelegramAPIError:
+            pass
+
+
+def _temp(msg, secs=45):
+    """Delete a helper message after a while so the group stays clean."""
+    async def _go():
+        await asyncio.sleep(secs)
+        try:
+            await msg.delete()
+        except TelegramAPIError:
+            pass
+    rooms.spawn(_go())
+
+
+async def send_banner(chat_id, caption, markup):
+    global _banner_id
     try:
-        await m.reply_photo(
-            photo=banner_url,
-            caption=welcome_text,
-            reply_markup=keyboard,
-            parse_mode="HTML",
-            has_spoiler=True
-        )
-    except:
-        # Fallback if image not available
-        await m.reply(welcome_text, reply_markup=keyboard, parse_mode="HTML")
+        src = _banner_id or FSInputFile("assets/banner.jpg")
+        msg = await bot.send_photo(chat_id, src, caption=caption, reply_markup=markup)
+        _banner_id = msg.photo[-1].file_id
+        return msg
+    except (FileNotFoundError, TelegramBadRequest):
+        _banner_id = None
+        return await bot.send_message(chat_id, caption, reply_markup=markup)
 
 
-# Panel changed - room display with spoiler image
-async def panel_changed(room):
-    """Update room panel with spoiler image and new buttons"""
-    
-    chat_id = room.chat_id
-    mid = store.group(chat_id).get("panel")
-    
-    text = ui.control_panel_text(room)
-    keyboard = ui.control_kb(chat_id)
-    
-    # Album art (spoiler)
-    album_art = room.current.get("image") if room.current else None
-    
-    if not mid:
-        # Create new panel
+# ---------------- room message auto-update (debounced): album art + caption + buttons ----------------
+_pending = {}
+_shown_cover = {}          # chat_id -> cover url currently on the message (None = banner)
+
+
+def panel_changed(chat_id):
+    if chat_id not in _pending:
+        _pending[chat_id] = asyncio.get_running_loop().create_task(_update_panel(chat_id))
+
+
+async def _update_panel(chat_id):
+    try:
+        await asyncio.sleep(2.0)
+        _pending.pop(chat_id, None)
+        mid = store.group(chat_id).get("panel")
+        if not mid:
+            return
+        room = rooms.get(chat_id, create=False)
+        caption, markup = ui.panel_caption(room), ui.panel_kb(chat_id, room)
+        cover = room.cur.get("cover") if room and room.cur else None
+        if cover != _shown_cover.get(chat_id) and (cover or _banner_id):
+            _shown_cover[chat_id] = cover                      # set first: never retry the same picture in a loop
+            try:
+                await bot.edit_message_media(chat_id=chat_id, message_id=mid, reply_markup=markup,
+                                             media=InputMediaPhoto(media=cover or _banner_id, caption=caption))
+                return
+            except TelegramBadRequest as e:
+                if "not modified" in str(e).lower():
+                    return                                       # otherwise fall back to a caption-only edit
         try:
-            if album_art:
-                msg = await bot.send_photo(
-                    chat_id=chat_id,
-                    photo=album_art,
-                    caption=text,
-                    reply_markup=keyboard,
-                    parse_mode="HTML",
-                    has_spoiler=True
-                )
-            else:
-                msg = await bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    reply_markup=keyboard,
-                    parse_mode="HTML"
-                )
-            
-            store.set_group(chat_id, panel=msg.message_id)
-            await msg.pin(disable_notification=True)
-        except:
-            pass
-    else:
-        # Update existing panel
-        try:
-            if album_art:
-                await bot.edit_message_media(
-                    chat_id=chat_id,
-                    message_id=mid,
-                    media=InputMediaPhoto(
-                        media=album_art,
-                        caption=text,
-                        parse_mode="HTML"
-                    ),
-                    reply_markup=keyboard
-                )
-            else:
-                await bot.edit_message_text(
-                    text=text,
-                    chat_id=chat_id,
-                    message_id=mid,
-                    reply_markup=keyboard,
-                    parse_mode="HTML"
-                )
-        except:
-            pass
+            await bot.edit_message_caption(chat_id=chat_id, message_id=mid, caption=caption, reply_markup=markup)
+        except TelegramBadRequest as e:
+            s = str(e).lower()
+            if "no caption" in s:
+                await bot.edit_message_text(caption, chat_id=chat_id, message_id=mid, reply_markup=markup)
+            elif "not found" in s or "can't be edited" in s:
+                store.set_group(chat_id, panel=None)
+    except TelegramBadRequest:
+        pass
+    except Exception as e:
+        log.debug("panel update failed: %s", e)
+    finally:
+        _pending.pop(chat_id, None)
 
 
-# Message cleanup on play
-_qmsgs = {}
+# ---------------- tidy chat: a request's messages disappear once its song is on air ----------------
+_qmsgs = {}                # chat_id -> message ids of /queue replies (stale as soon as the song changes)
+
 
 def _delete_msgs(chat_id, ids, delay=0):
-    """Delete messages with optional delay"""
     if not ids:
         return
-    
+
     async def _go():
         if delay:
             await asyncio.sleep(delay)
         for mid in ids:
             try:
                 await bot.delete_message(chat_id, mid)
-            except:
-                pass
-    
+            except TelegramAPIError:
+                pass                                   # no delete right, or already gone
     rooms.spawn(_go())
 
 
 def on_play(room, track):
-    """Track started playing"""
     store.inc("plays")
     _delete_msgs(room.chat_id, _qmsgs.pop(room.chat_id, []))
     track["started"] = True
@@ -126,136 +167,358 @@ def on_play(room, track):
 
 
 def on_drop(room, track):
-    """Track skipped/dropped"""
     _delete_msgs(room.chat_id, track.pop("msgs", []))
 
 
 def on_fail(room, track):
-    """Track failed to play"""
-    pass
+    async def _say():
+        try:
+            await bot.send_message(room.chat_id, f"⚠️ Couldn't load <b>{ui.esc(track['title'][:60])}</b>, skipped.")
+        except TelegramAPIError:
+            pass
+    rooms.spawn(_say())
 
 
-# Callback handlers
-@router.callback_query(F.data == "pause")
-async def cb_pause(q):
-    room = rooms.get(q.message.chat.id, create=False)
-    if room:
-        await room.pause()
-    await q.answer("⏸ Paused")
+# ---------------- private chat ----------------
+@router.message(CommandStart(), F.chat.type == "private")
+async def start_private(m: Message):
+    if not await guard(m):
+        return
+    store.touch_user(m.from_user)
+    await send_banner(m.chat.id, ui.WELCOME.format(name=ui.esc(m.from_user.first_name[:30])), ui.welcome_kb())
 
 
-@router.callback_query(F.data == "skip")
-async def cb_skip(q):
-    room = rooms.get(q.message.chat.id, create=False)
-    if room:
-        await room.skip()
-    await q.answer("⏭ Skipped")
+@router.message(Command("help"))
+async def cmd_help(m: Message):
+    if await guard(m):
+        await m.answer(ui.HELP)
 
 
-@router.callback_query(F.data == "loop")
-async def cb_loop(q):
-    room = rooms.get(q.message.chat.id, create=False)
-    if room:
-        room.toggle_loop()
-    await q.answer("🔁 Loop toggled")
+@router.callback_query(F.data == "h")
+async def cb_help(cb: CallbackQuery):
+    if not await guard_cb(cb):
+        return
+    await cb.answer()
+    await cb.message.answer(ui.HELP)
 
 
-@router.callback_query(F.data == "shuffle")
-async def cb_shuffle(q):
-    room = rooms.get(q.message.chat.id, create=False)
-    if room:
-        room.shuffle()
-    await q.answer("🔀 Queue shuffled")
+# ---------------- group: open the room ----------------
+@router.message(CommandStart(), F.chat.type.in_(GROUPS))
+async def start_group(m: Message):
+    if not await guard(m):
+        return
+    store.touch_group(m.chat)
+    if not await admin_of(m):
+        return await m.reply("🔒 Only group admins can open the room. Ask an admin to send /start.")
+    try:
+        mine = await bot.get_chat_member(m.chat.id, state.me.id)
+    except TelegramAPIError:
+        return await m.reply("I can't check my permissions here. Please make me an admin and try again.")
+    if mine.status != "administrator" or not getattr(mine, "can_pin_messages", False):
+        return await m.reply('Please make me an admin with the "Pin messages" permission, then send /start again.')
+    room = rooms.get(m.chat.id)
+    if room is None:
+        return await m.reply("I'm very busy right now. Please try again in a minute.")
+    msg = await send_banner(m.chat.id, ui.panel_caption(room), ui.panel_kb(m.chat.id, room))
+    store.set_group(m.chat.id, panel=msg.message_id, dead=False)
+    _shown_cover[m.chat.id] = None
+    try:
+        await bot.pin_chat_message(m.chat.id, msg.message_id, disable_notification=True)
+    except TelegramAPIError:
+        await m.answer('I couldn\'t pin the message. Please give me the "Pin messages" permission.')
+    await _autodel(m)
+    if room.cur:
+        panel_changed(m.chat.id)
 
 
-@router.callback_query(F.data == "queue")
-async def cb_queue(q):
-    room = rooms.get(q.message.chat.id, create=False)
-    text = ui.queue_text(room)
-    
-    reply = await q.message.reply(text, parse_mode="HTML")
-    ids = _qmsgs.setdefault(q.message.chat.id, [])
-    ids[:] = (ids + [reply.message_id, q.message.message_id])[-20:]
-    
-    await q.answer("📝 Queue updated")
+@router.message(Command("join", "room"), F.chat.type.in_(GROUPS))
+async def cmd_join(m: Message):
+    if not await guard(m):
+        return
+    if not store.group(m.chat.id)["panel"]:
+        return await m.reply("The room isn't open yet. Ask an admin to send /start first.")
+    await m.reply("🎧 <b>" + ui.tc("tap to join the room") + "</b>", reply_markup=ui.join_kb(m.chat.id))
 
 
-@router.callback_query(F.data == "autoplay")
-async def cb_autoplay(q):
-    room = rooms.get(q.message.chat.id, create=False)
-    if room:
-        room.toggle_autoplay()
-    await q.answer("♾ Autoplay toggled")
+@router.message(Command("play"), F.chat.type.in_(GROUPS))
+async def cmd_play(m: Message, command: CommandObject):
+    if not await guard(m):
+        return
+    store.touch_group(m.chat)
+    g = store.group(m.chat.id)
+    if not g["panel"]:
+        return await m.reply("The room isn't open yet. Ask an admin to send /start first.")
+    if g["play"] == "admins" and not await admin_of(m):
+        return await m.reply("🔒 Only admins can add songs in this group.")
+    q = clean_text(command.args or "", 80)
+    if len(q) < 2:
+        return await m.reply("Usage: <code>/play song name</code>")
+    results = await music.search(q, 5)
+    if not results:
+        return await m.reply("😕 No results. Try another name or add the artist.")
+    room = rooms.get(m.chat.id)
+    if room is None:
+        return await m.reply("I'm very busy right now. Please try again in a minute.")
+    t = results[0]
+    t.update(by=clean_text(m.from_user.first_name if m.from_user else "Admin", 30), by_id=m.from_user.id if m.from_user else 0, src="g")
+    pos = room.add(t)
+    if pos is None:
+        return await m.reply("The queue is full right now.")
+    reply = await m.reply(ui.added_text(t, pos, t["by"]), reply_markup=ui.join_kb(m.chat.id))
+    await _autodel(m)
+    msgs = [reply.message_id] + ([] if store.group(m.chat.id)["autodel"] else [m.message_id])
+    t["instant"] = pos == "start"
+    if t.get("started"):
+        _delete_msgs(m.chat.id, msgs, 20 if t["instant"] else 0)
+    else:
+        t["msgs"] = msgs                                  # removed when this song starts playing
 
 
-@router.callback_query(F.data == "invite")
-async def cb_invite(q):
-    chat_id = q.message.chat.id
-    room_link = f"https://t.me/{state.config.BOT_USERNAME}/{state.config.MINIAPP_SHORT}?startapp={security.encode_room(chat_id)}"
-    
-    await q.message.reply(
-        f"🎧 <b>Share This Link</b>\n\n"
-        f"<a href='{room_link}'>▶️ Join Room</a>",
-        parse_mode="HTML"
-    )
-    await q.answer("📨 Share link sent")
+@router.message(Command("queue"), F.chat.type.in_(GROUPS))
+async def cmd_queue(m: Message):
+    if await guard(m):
+        r = await m.reply(ui.queue_text(rooms.get(m.chat.id, create=False)))
+        ids = _qmsgs.setdefault(m.chat.id, [])
+        ids[:] = (ids + [r.message_id, m.message_id])[-20:]
 
 
-@router.callback_query(F.data == "more")
-async def cb_more(q):
-    await q.answer("⚙ More options coming soon", show_alert=True)
+# ---------------- invite: anyone in the room can call the rest of the group ----------------
+_inv_last = {}             # chat_id -> monotonic time of the last invite (stops spam)
+INVITE_COOLDOWN = 90
 
 
-@router.callback_query(F.data == "menu")
-async def cb_menu(q):
-    await q.answer("📋 Menu options", show_alert=True)
+async def invite_group(chat_id, name, target=None):
+    """Posts one invite message with a Join Room button. Returns the message, or None when on cooldown.
+    Used by the chat button, /invite and the Mini App (which has already checked membership)."""
+    now = time.monotonic()
+    if now - _inv_last.get(chat_id, -1e9) < INVITE_COOLDOWN:
+        return None
+    _inv_last[chat_id] = now
+    room = rooms.get(chat_id, create=False)
+    try:
+        msg = await bot.send_message(chat_id, ui.invite_text(clean_text(name or "Someone", 30), target, room.cur if room else None),
+                                     reply_markup=ui.join_kb(chat_id))
+    except TelegramAPIError:
+        _inv_last.pop(chat_id, None)
+        return None
+    _temp(msg, 300)
+    return msg
 
 
-# Admin commands
-@router.message(Command("end"))
-async def cmd_end(m: Message):
-    """End the room (admin only)"""
-    
-    if not await state.is_admin(m.chat.id, m.from_user.id):
-        return await m.reply("❌ Admin only")
-    
-    await close_room(m.chat.id)
-    await m.reply("✅ Room ended")
+@router.message(Command("invite"), F.chat.type.in_(GROUPS))
+async def cmd_invite(m: Message):
+    if not await guard(m):
+        return
+    if not store.group(m.chat.id)["panel"]:
+        return await m.reply("The room isn't open yet. Ask an admin to send /start first.")
+    target = None
+    rp = m.reply_to_message
+    if rp and rp.from_user and not rp.from_user.is_bot and rp.from_user.id != m.from_user.id:
+        target = f'<a href="tg://user?id={rp.from_user.id}">{ui.esc(clean_text(rp.from_user.first_name or "friend", 30))}</a>'
+    if await invite_group(m.chat.id, m.from_user.first_name, target) is None:
+        _temp(await m.reply("📨 An invite was just sent. Please wait a moment before sending another."), 15)
+    await _autodel(m)
 
 
+@router.callback_query(F.data == "inv")
+async def cb_invite(cb: CallbackQuery):
+    if not await guard_cb(cb):
+        return
+    chat = cb.message.chat
+    if chat.type not in GROUPS:
+        return await cb.answer()
+    if await invite_group(chat.id, cb.from_user.first_name) is None:
+        return await cb.answer("📨 An invite was just sent. Try again in a minute.", show_alert=True)
+    await cb.answer("📨 Invite sent to the group")
+
+
+# ---------------- group: admin controls ----------------
+async def _ctl(m: Message, fn, txt):
+    if not await guard(m):
+        return
+    if not await admin_of(m):
+        return await m.reply("🔒 Only group admins can do this.")
+    r = rooms.get(m.chat.id, create=False)
+    if r is None or (r.cur is None and fn not in ("clear", "end", "toggle_autoplay")):
+        return await m.reply("Nothing is playing right now.")
+    r = r or rooms.get(m.chat.id)
+    res = await getattr(r, fn)()
+    await m.reply(txt(res) if callable(txt) else txt)
+    await _autodel(m)
+
+
+def _make(cmd, fn, txt):
+    @router.message(Command(cmd), F.chat.type.in_(GROUPS))
+    async def _h(m: Message):
+        await _ctl(m, fn, txt)
+    return _h
+
+
+for _c, _f, _t in (("skip", "skip", "⏭ Skipped."), ("pause", "pause", "⏸ Paused."), ("resume", "resume", "▶ Resumed."),
+                   ("shuffle", "shuffle", "🔀 Queue shuffled."), ("clear", "clear", "🧹 Queue cleared."),
+                   ("loop", "toggle_loop", lambda on: "🔁 Loop on." if on else "➡ Loop off."),
+                   ("autoplay", "toggle_autoplay", lambda on: "♾ Autoplay on, I'll keep similar songs coming." if on else "Autoplay off.")):
+    _make(_c, _f, _t)
+
+
+# ---------------- /end: the room lives from /start until an admin ends it ----------------
 async def close_room(chat_id):
-    """Close room and notify clients"""
-    
     mid = store.group(chat_id).get("panel")
     room = rooms.get(chat_id, create=False)
-    
-    store.set_group(chat_id, panel=None)
-    
-    if room:
+    store.set_group(chat_id, panel=None)                  # first: /play and new joins are refused from now on
+    if room is not None:
         await room.end()
         for c in list(room.clients.values()):
-            try:
-                await c.send({"t": "fatal", "m": "Room ended by admin"})
-                await c.close()
-            except:
-                pass
+            await c.send({"t": "fatal", "m": "The room was ended by an admin."})
+            await c.close()
         rooms.drop(chat_id)
-    
     _qmsgs.pop(chat_id, None)
-    
     if mid:
         try:
-            await bot.edit_message_text(
-                ui.closed_caption(),
-                chat_id=chat_id,
-                message_id=mid,
-                parse_mode="HTML",
-                reply_markup=None
-            )
-        except:
+            await bot.edit_message_caption(chat_id=chat_id, message_id=mid, caption=ui.closed_caption(), reply_markup=None)
+        except TelegramBadRequest:
+            try:
+                await bot.edit_message_text(ui.closed_caption(), chat_id=chat_id, message_id=mid, reply_markup=None)
+            except TelegramAPIError:
+                pass
+        except TelegramAPIError:
             pass
-        
         try:
             await bot.unpin_chat_message(chat_id, mid)
-        except:
+        except TelegramAPIError:
             pass
+
+
+@router.message(Command("end"), F.chat.type.in_(GROUPS))
+async def cmd_end(m: Message):
+    if not await guard(m):
+        return
+    if not await admin_of(m):
+        return await m.reply("🔒 Only group admins can do this.")
+    if not store.group(m.chat.id)["panel"]:
+        return await m.reply("The room isn't open. Send /start to open it.")
+    await close_room(m.chat.id)
+    await m.reply(ui.ended_text())
+    await _autodel(m)
+
+
+# ---------------- buttons on the room message ----------------
+@router.callback_query(F.data.in_({"pp", "sk", "lp", "sh", "ap", "st"}))
+async def cb_panel(cb: CallbackQuery):
+    if not await guard_cb(cb):
+        return
+    chat = cb.message.chat
+    if chat.type not in GROUPS:
+        return await cb.answer()
+    if not await is_admin(chat.id, cb.from_user.id):
+        return await cb.answer("🔒 Only group admins can use this button.", show_alert=True)
+    d = cb.data
+    if d == "st":
+        g = store.group(chat.id)
+        await cb.answer()
+        msg = await cb.message.answer(ui.settings_text(g), reply_markup=ui.settings_kb(g))
+        return _temp(msg, 120)
+    r = rooms.get(chat.id)
+    if r is None:
+        return await cb.answer("I'm busy right now, try again in a minute.", show_alert=True)
+    if d == "ap":
+        return await cb.answer("♾ Autoplay on" if await r.toggle_autoplay() else "Autoplay off")
+    if r.cur is None:
+        return await cb.answer("Nothing is playing right now. Use /play first.", show_alert=True)
+    if d == "pp":
+        was = r.paused
+        await (r.resume() if was else r.pause())
+        await cb.answer("▶ Resumed" if was else "⏸ Paused")
+    elif d == "sk":
+        await r.skip()
+        await cb.answer("⏭ Skipped")
+    elif d == "lp":
+        await cb.answer("🔁 Loop on" if await r.toggle_loop() else "Loop off")
+    else:
+        await r.shuffle()
+        await cb.answer("🔀 Shuffled")
+
+
+@router.callback_query(F.data == "q")
+async def cb_queue(cb: CallbackQuery):
+    if not await guard_cb(cb):
+        return
+    await cb.answer()
+    r = await cb.message.reply(ui.queue_text(rooms.get(cb.message.chat.id, create=False)))
+    ids = _qmsgs.setdefault(cb.message.chat.id, [])
+    ids[:] = (ids + [r.message_id])[-20:]
+    _temp(r, 45)
+
+
+# ---------------- settings (group admins) ----------------
+@router.message(Command("settings"), F.chat.type.in_(GROUPS))
+async def cmd_settings(m: Message):
+    if not await guard(m):
+        return
+    if not await admin_of(m):
+        return await m.reply("🔒 Only group admins can change settings.")
+    g = store.group(m.chat.id)
+    await m.answer(ui.settings_text(g), reply_markup=ui.settings_kb(g))
+    await _autodel(m)
+
+
+@router.callback_query(F.data.startswith("set:"))
+async def cb_settings(cb: CallbackQuery):
+    if not await guard_cb(cb):
+        return
+    chat = cb.message.chat
+    if chat.type not in GROUPS or not await is_admin(chat.id, cb.from_user.id):
+        return await cb.answer("🔒 Only group admins can change settings.", show_alert=True)
+    parts = cb.data.split(":")
+    if parts[1] == "play" and len(parts) == 3 and parts[2] in ("all", "admins"):
+        store.set_group(chat.id, play=parts[2])
+    elif parts[1] == "autodel" and len(parts) == 3 and parts[2] in ("0", "1"):
+        store.set_group(chat.id, autodel=parts[2] == "1")
+    elif parts[1] == "clear":
+        r = rooms.get(chat.id, create=False)
+        if r:
+            await r.clear()
+        return await cb.answer("🧹 Queue cleared")
+    elif parts[1] == "close":
+        try:
+            await cb.message.delete()
+        except TelegramAPIError:
+            pass
+        return await cb.answer()
+    g = store.group(chat.id)
+    try:
+        await cb.message.edit_text(ui.settings_text(g), reply_markup=ui.settings_kb(g))
+    except TelegramBadRequest:
+        pass
+    await cb.answer("✅ Saved")
+
+
+# ---------------- added to / removed from chats ----------------
+@router.my_chat_member()
+async def my_member(ev: ChatMemberUpdated):
+    new, old = ev.new_chat_member.status, ev.old_chat_member.status
+    if ev.chat.type in GROUPS:
+        if new in ("member", "administrator"):
+            if store.is_banned("g", ev.chat.id):
+                try:
+                    await bot.leave_chat(ev.chat.id)
+                except TelegramAPIError:
+                    pass
+                return
+            store.touch_group(ev.chat)
+            if old in ("left", "kicked"):
+                try:
+                    await bot.send_message(ev.chat.id, ui.THANKS)
+                except TelegramAPIError:
+                    pass
+        elif new in ("left", "kicked"):
+            store.mark_dead("groups", ev.chat.id)
+            store.set_group(ev.chat.id, panel=None)
+            rooms.drop(ev.chat.id)
+    elif ev.chat.type == "private":
+        if new == "kicked":
+            store.mark_dead("users", ev.chat.id)
+        elif new == "member":
+            u = ev.from_user
+            if u:
+                store.touch_user(u)

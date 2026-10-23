@@ -153,6 +153,20 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
         await self.room._finish(self.room.seq)
         self.assertIsNotNone(self.room.cur)                    # with a listener autoplay keeps going
 
+    async def test_next_song_is_prefetched(self):
+        from nox.rooms import Room
+        self.room.add(self.track("one"))
+        self.room.add(self.track("two"))
+        await self.settle()
+        await asyncio.sleep(0.05)
+        nxt = self.room.queue[0]
+        self.assertIsNotNone(Room._fresh(nxt))                     # resolved in the background
+        self.assertEqual(self.room.state()["nxt"], Room._fresh(nxt)["url"])
+        url = Room._fresh(nxt)["url"]
+        await self.room._finish(self.room.seq)
+        self.assertEqual(self.room.url, url)                       # the change used the ready URL
+        self.assertNotIn("_r", self.room.cur)
+
     async def test_people_list(self):
         a = FakeClient(1)
         a.name, a.photo, a.adm, a.v, a.m, a.s = "Zed", None, True, True, True, False

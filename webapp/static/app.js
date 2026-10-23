@@ -336,12 +336,32 @@
     else if (a > 0.4) au.playbackRate = d > 0 ? 1.04 : 0.96;         // gently speed up / slow down
     else if (a < 0.15) au.playbackRate = 1;
   }
+  function recover() {                                              // after the app was in the background the old connection is often dead
+    if (!st || !st.track || !st.url || localOff || st.paused) return;
+    if (!au.src || au.error || au.ended || (au.readyState < 2 && au.networkState !== 2)) loadTrack(); else syncAudio();
+  }
+  let stuckSince = 0, lastRecover = 0;
+  function watchStuck() {
+    if (!st || !st.track || st.paused || localOff || !$("tap").hidden) { stuckSince = 0; return; }
+    const bad = au.paused || au.readyState < 2;
+    if (!bad) { stuckSince = 0; return; }
+    if (!stuckSince) stuckSince = Date.now();
+    else if (Date.now() - stuckSince > (au.paused ? 3500 : 10000) && Date.now() - lastRecover > 8000) { lastRecover = Date.now(); stuckSince = 0; recover(); }
+  }
   function warmNext() {                                              // preload the next song only near the end, so it never competes with the current one
     if (!st || !st.track || !st.nxt || st.nxt === nxtUrl) return;
     const left = (isFinite(au.duration) && au.duration > 0 ? au.duration : (st.track.dur || 0)) - want();
     if (left > 0 && left < 30) { nxtUrl = st.nxt; pre.preload = "auto"; pre.src = st.nxt; }
   }
-  au.onended = () => { if (st) send({ t: "ended", seq: st.seq }); };
+  let localNext = false;
+  au.onended = () => {
+    if (!st) return;
+    send({ t: "ended", seq: st.seq });
+    if (st.nxt && !st.loop && !localOff && !localNext) {              // don't wait for the server (screen off / slow link): start the next song right now
+      localNext = true; badSent = -1; au.playbackRate = 1;
+      au.src = st.nxt; au.load(); const p = au.play(); if (p && p.catch) p.catch(() => {});
+    }
+  };
   au.onerror = () => { if (st && st.track && badSent !== st.seq) { badSent = st.seq; send({ t: "bad", seq: st.seq }); } };
   au.addEventListener("pause", () => {                               // screen off / app in background: try to keep the music going
     if (!st || !st.track || st.paused || localOff || au.ended || !document.hidden || Date.now() - lastRetry < 2000) return;
@@ -353,10 +373,11 @@
     const isNew = !st || st.seq !== m.seq;
     st = m;
     if (isNew) nxtUrl = "";
-    st.nxt = m.nxt;
     renderNow(); renderQueue(); renderMini();
+    localNext = false;
     if (!m.track) { au.pause(); au.removeAttribute("src"); return; }
-    if (isNew) loadTrack(); else syncAudio();
+    if (isNew && au.src && au.src === m.url && !au.error && au.readyState >= 2) { badSent = -1; syncAudio(); }   // already playing this song (moved on by itself)
+    else if (isNew) loadTrack(); else syncAudio();
   }
 
   // ---------- render: now playing ----------
@@ -425,10 +446,15 @@
       }
     } catch (e) {}
   }
-  setInterval(() => { syncAudio(); warmNext(); draw(); mediaPos(); }, 500);
-  function wake() { syncAudio(); if (!ws || ws.readyState > 1) connect(); resumeVoice(); }
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) wake(); });
+  setInterval(() => { syncAudio(); watchStuck(); warmNext(); draw(); mediaPos(); }, 500);
+  // light mode while the app is in the background: far less GPU/memory, so Android is less likely to kill the page ("Aw, Snap!")
+  const root = document.documentElement;
+  try { if ((navigator.deviceMemory && navigator.deviceMemory <= 4) || (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4)) root.classList.add("slim"); } catch (e) {}
+  function wake() { root.classList.remove("lite"); recover(); if (!ws || ws.readyState > 1) connect(); resumeVoice(); }
+  document.addEventListener("visibilitychange", () => { if (document.hidden) root.classList.add("lite"); else wake(); });
+  try { if (tg && tg.onEvent) tg.onEvent("deactivated", () => root.classList.add("lite")); } catch (e) {}
   try { if (tg && tg.onEvent) tg.onEvent("activated", wake); } catch (e) {}
+  window.addEventListener("pageshow", wake); window.addEventListener("online", wake);
 
   // ---------- render: queue ----------
   function qRow(s, i) {

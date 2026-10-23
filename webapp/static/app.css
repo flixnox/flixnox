@@ -21,9 +21,9 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0;min-width:0;
 .c-teal{--c:6,182,212}.c-amber{--c:245,158,11}.c-rose{--c:244,63,94}
 
 /* ---------- ambience ---------- */
-.amb{position:fixed;inset:-20%;background-size:cover;background-position:center;filter:blur(70px) saturate(1.5);opacity:0;transition:opacity 1.2s var(--ease),background-image .6s;pointer-events:none}
+.amb{position:fixed;inset:-20%;background-size:cover;background-position:center;filter:blur(40px) saturate(1.4);opacity:0;transition:opacity 1.2s var(--ease),background-image .6s;pointer-events:none}
 .amb.on{opacity:.3}
-.orb{position:fixed;border-radius:50%;filter:blur(70px);pointer-events:none;opacity:.55;animation:drift 18s ease-in-out infinite alternate}
+.orb{position:fixed;border-radius:50%;filter:blur(42px);pointer-events:none;opacity:.55;animation:drift 18s ease-in-out infinite alternate}
 .o1{width:300px;height:300px;background:#7fb0ff;top:-90px;left:-70px}
 .o2{width:260px;height:260px;background:#9be7ff;bottom:60px;right:-90px;animation-delay:-6s}
 .o3{width:220px;height:220px;background:#c4b5ff;top:44%;left:-110px;animation-delay:-11s}
@@ -205,3 +205,10 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0;min-width:0;
 .stage{position:relative;border-radius:24px;overflow:hidden;margin:0 0 12px;background:#0b1633}
 .stage video{display:block;width:100%;max-height:46vh;background:#0b1633;object-fit:contain}
 .stagetag{position:absolute;left:12px;top:12px;padding:5px 11px;border-radius:99px;font-size:12px;font-weight:800;color:#fff;background:rgba(11,22,51,.6);font-variant-caps:normal}
+
+/* background / low-memory modes: no big blurs, no animation, no backdrop filters */
+html.lite *,html.lite *::before,html.lite *::after{animation:none!important;transition:none!important}
+html.lite .amb,html.lite .orb,html.lite .ring{display:none!important}
+html.lite .glass,html.lite .eq,html.lite .sheetbg,html.lite .veil,html.slim .glass,html.slim .eq,html.slim .sheetbg,html.slim .veil{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
+html.slim .glass{background:rgba(255,255,255,.93)}
+html.slim .amb,html.slim .orb{display:none!important}
