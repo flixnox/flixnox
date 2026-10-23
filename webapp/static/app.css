@@ -202,8 +202,8 @@ input{font:inherit;color:inherit;background:none;border:0;outline:0;min-width:0;
 .vdock{display:flex;gap:10px;flex-wrap:wrap;padding:12px;border-radius:24px;margin:0 0 6px}
 .vbtn{flex:1 1 auto;min-width:96px;height:48px;border-radius:16px;display:flex;align-items:center;justify-content:center;gap:8px;font-weight:800;font-size:14px;color:#fff;background:linear-gradient(135deg,rgba(var(--c),1),rgba(var(--c),.75));box-shadow:0 8px 20px rgba(var(--c),.35);transition:transform .2s var(--spring)}
 .vbtn:active{transform:scale(.95)}.vbtn .i{width:19px;height:19px}.vbtn.off{background:rgba(var(--c),.14);color:rgb(var(--c));box-shadow:none}
-.stage{position:relative;border-radius:24px;overflow:hidden;margin:0 0 12px;background:#0b1633}
-.stage video{display:block;width:100%;max-height:46vh;background:#0b1633;object-fit:contain}
+.sstage{position:relative;border-radius:24px;overflow:hidden;margin:0 0 12px;background:#0b1633}
+.sstage video{display:block;width:100%;max-height:46vh;background:#0b1633;object-fit:contain}
 .stagetag{position:absolute;left:12px;top:12px;padding:5px 11px;border-radius:99px;font-size:12px;font-weight:800;color:#fff;background:rgba(11,22,51,.6);font-variant-caps:normal}
 
 /* background / low-memory modes: no big blurs, no animation, no backdrop filters */

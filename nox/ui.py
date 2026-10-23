@@ -103,36 +103,92 @@ HELP = (
     "2️⃣ " + tc("admin sends /start") + "\n"
     "3️⃣ " + tc("anyone adds songs") + " : " + _code("/play song name") + "\n"
     "4️⃣ " + tc("tap join room to listen") + "\n" + DIV + "\n"
-    "🎵 <b>" + tc("everyone") + "</b>\n"
-    "/play · /queue · /invite · /join · /help\n" + DIV + "\n"
-    "🛡 <b>" + tc("admins") + "</b>\n"
-    "/skip · /pause · /resume · /loop · /shuffle\n"
-    "/autoplay · /clear · /end · /settings\n" + DIV + "\n"
-    "💡 <i>Reply to a friend with /invite to call them in.</i>"
+    "🎧 <b>" + tc("alone?") + "</b> " + tc("send a song name here in my chat") + "\n"
+    "👇 <i>Tap a page below. Tap any command button to see what it does.</i>"
 )
+
+# page -> (title, [(command, short description)])
+HELP_PAGES = {
+    "all": ("🎵 everyone", [
+        ("/play", "Add a song to the queue.\nExample: /play kesariya"),
+        ("/queue", "Show what is playing and what comes next."),
+        ("/invite", "Call friends into the room. Reply to someone with /invite to ping them."),
+        ("/join", "Get the button that opens the live room."),
+        ("/help", "Open this help page."),
+    ]),
+    "adm": ("🛡 admins", [
+        ("/skip", "Skip to the next song."),
+        ("/pause", "Pause the music for everyone."),
+        ("/resume", "Resume the music."),
+        ("/loop", "Repeat the current song."),
+        ("/shuffle", "Shuffle the queue."),
+        ("/autoplay", "Keep playing similar songs when the queue ends."),
+        ("/clear", "Empty the queue."),
+        ("/end", "Close the room."),
+        ("/settings", "Who can add songs, auto-delete and more."),
+    ]),
+    "me": ("🎧 private player", [
+        ("song name", "Send any song or artist name here. Pick a result to start your own player."),
+        ("/play", "Same as sending a name: /play kesariya"),
+        ("Open Player", "Listen alone in the Mini App."),
+        ("In Chat", "Get the song as an audio file right here in the chat."),
+        ("Stop", "Close your private player."),
+    ]),
+}
+
+
+def help_text(page="home"):
+    if page == "home" or page not in HELP_PAGES:
+        return HELP
+    title, cmds = HELP_PAGES[page]
+    return "\n".join([head(title.split(" ", 1)[0] + " <b>" + tc(title.split(" ", 1)[1]) + "</b>"), DIV,
+                      "👇 <i>Tap a command to see what it does.</i>"])
+
+
+def help_kb(page="home"):
+    """Home: three page buttons. A page: its commands as buttons (2 per row, blue/green rows) + back."""
+    if page == "home" or page not in HELP_PAGES:
+        return kb([btn("🎵 Everyone", cb="hp:all", style=P, fill="half"), btn("🛡 Admins", cb="hp:adm", style=P, fill="half")],
+                  [btn("🎧 Private Player", cb="hp:me", style=S, fill="full")],
+                  [btn("🏠 Back", cb="hb", style=S, fill="full")])
+    cmds = HELP_PAGES[page][1]
+    rows = []
+    for i in range(0, len(cmds), 2):
+        st = P if (i // 2) % 2 == 0 else S
+        rows.append([InlineKeyboardButton(text=(c if c.startswith("/") else tc(c)), callback_data=f"hc:{page}:{j}", style=st)
+                     for j, (c, _d) in list(enumerate(cmds))[i:i + 2]])
+    rows.append([btn("⬅ Help", cb="hp:home", style=P, fill="half"), btn("🏠 Back", cb="hb", style=S, fill="half")])
+    return kb(*rows)
+
+
 THANKS = (head("🎉 <b>" + tc("thanks for adding me") + "</b>") + "\n" + DIV + "\n"
           "🛡 " + tc("make me admin with pin messages") + "\n"
           "▶️ " + tc("then send /start to open the room"))
 
 
 def welcome_kb():
-    rows = [[btn("≡ ➕ Add To Group ≡", url=f"https://t.me/{config.BOT_USERNAME}?startgroup=true&admin=pin_messages+delete_messages", style=S)],
-            [btn("📖 Help", cb="h", style=P)]]
+    rows = [[btn("≡ ➕ Add To Group ≡", url=f"https://t.me/{config.BOT_USERNAME}?startgroup=true&admin=pin_messages+delete_messages", style=P)],
+            [btn("📖 Help", cb="h", style=S)]]
     if config.SUPPORT_URL:
-        rows[1].append(btn("💬 Support", url=config.SUPPORT_URL, style=P))
+        rows[1].append(btn("💬 Support", url=config.SUPPORT_URL, style=S))
     return kb(*rows)
 
 
+def _on(label, on):
+    return label + (" ✔" if on else "")
+
+
 def panel_kb(chat_id, room=None):
+    """Rows alternate blue / green / blue / green / blue."""
     paused = bool(room and room.paused)
     loop_on = bool(room and room.loop)
     auto_on = bool(room and room.autoplay)
     return kb(
         [btn("🎧 Join Room", url=join_url(chat_id), style=P, fill="full")],
-        [btn("▶ Resume" if paused else "⏸ Pause", cb="pp", style=S, fill="half"), btn("⏭ Skip", cb="sk", style=P, fill="half")],
-        [btn("📜 Queue", cb="q", style=P, fill="half"), btn("🔁 Loop", cb="lp", style=S if loop_on else P, fill="half")],
-        [btn("🔀 Shuffle", cb="sh", style=P, fill="half"), btn("♾ Auto", cb="ap", style=S if auto_on else P, fill="half")],
-        [btn("📨 Invite", cb="inv", style=S, fill="half"), btn("⚙ More", cb="st", style=P, fill="half")],
+        [btn("▶ Resume" if paused else "⏸ Pause", cb="pp", style=S, fill="half"), btn("⏭ Skip", cb="sk", style=S, fill="half")],
+        [btn("📜 Queue", cb="q", style=P, fill="half"), btn(_on("🔁 Loop", loop_on), cb="lp", style=P, fill="half")],
+        [btn("🔀 Shuffle", cb="sh", style=S, fill="half"), btn(_on("♾ Auto", auto_on), cb="ap", style=S, fill="half")],
+        [btn("📨 Invite", cb="inv", style=P, fill="half"), btn("⚙ More", cb="st", style=P, fill="half")],
     )
 
 
@@ -258,27 +314,29 @@ def solo_caption(room):
 
 
 def solo_kb(uid, room=None):
+    """Blue / green / blue / green rows. Listen in the Mini App (Open Player) or right here in the chat (In Chat)."""
     paused = bool(room and room.paused)
     loop_on = bool(room and room.loop)
     auto_on = bool(room and room.autoplay)
     return kb(
-        [btn("📲 Open Player", url=join_url(uid), style=P, fill="full")],
-        [btn("▶ Resume" if paused else "⏸ Pause", cb="pp", style=S, fill="half"), btn("⏭ Skip", cb="sk", style=P, fill="half")],
-        [btn("📜 Queue", cb="q", style=P, fill="half"), btn("🔁 Loop", cb="lp", style=S if loop_on else P, fill="half")],
-        [btn("♾ Auto", cb="ap", style=S if auto_on else P, fill="half"), btn("⏹ Stop", cb="sx", style=D, fill="half")],
+        [btn("📲 Open Player", url=join_url(uid), style=P, fill="half"), btn("🎵 In Chat", cb="sa", style=P, fill="half")],
+        [btn("▶ Resume" if paused else "⏸ Pause", cb="pp", style=S, fill="half"), btn("⏭ Skip", cb="sk", style=S, fill="half")],
+        [btn("📜 Queue", cb="q", style=P, fill="half"), btn(_on("🔁 Loop", loop_on), cb="lp", style=P, fill="half")],
+        [btn(_on("♾ Auto", auto_on), cb="ap", style=S, fill="half"), btn("⏹ Stop", cb="sx", style=S, fill="half")],
     )
 
 
 def results_text(q):
-    return "\n".join([head("🔎 <b>" + tc("search results") + "</b>"), DIV, f"🎵 <b>{esc(cut(q, 60))}</b>", "<i>Tap a song to play it in your player.</i>"])
+    return "\n".join([head("🔎 <b>" + tc("search results") + "</b>"), DIV, f"🎵 <b>{esc(cut(q, 60))}</b>",
+                      "<i>Tap a song. Then listen in the Mini App or right here in the chat.</i>"])
 
 
 def results_kb(items, uid):
     rows = []
-    for it in items[:8]:
+    for i, it in enumerate(items[:8]):
         label = f"🎵 {cut(it['title'], 30)} · {cut(it['artist'], 16)}"
-        rows.append([btn(label, cb="ps:" + it["token"], style=P, small=False)])
-    rows.append([btn("📲 Open Player", url=join_url(uid), style=S, fill="full")])
+        rows.append([btn(label, cb="ps:" + it["token"], style=P if i % 2 == 0 else S, small=False)])
+    rows.append([btn("📲 Open Player", url=join_url(uid), style=P if len(rows) % 2 == 0 else S, fill="full")])
     return kb(*rows)
 
 

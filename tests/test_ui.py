@@ -36,15 +36,18 @@ class UiTests(unittest.TestCase):
         rows = ui.panel_kb(-100, room(cur=trk(1))).inline_keyboard
         got = {b.callback_data for r in rows for b in r if b.callback_data}
         self.assertEqual(got, {"pp", "sk", "q", "lp", "sh", "ap", "inv", "st"})
+        ids = [[b.style for b in r] for r in rows]
+        self.assertEqual([r[0] for r in ids], ["primary", "success", "primary", "success", "primary"])
+        self.assertTrue(all(len(set(r)) == 1 for r in ids))
         self.assertTrue(all(len(r) <= 3 for r in rows))
 
     def test_texts(self):
         self.assertIn(ui.tc("starting now"), ui.added_text(trk(1), "start", "Sam"))
         self.assertLessEqual(len(ui.WELCOME.format(name="N" * 30)), 1024)
-        self.assertIn("/invite", ui.HELP)
+        self.assertIn("/invite", [c for c, _ in ui.HELP_PAGES["all"][1]])
         self.assertEqual(ui.tc("welcome to sonic nox"), "Wᴇʟᴄᴏᴍᴇ Tᴏ Sᴏɴɪᴄ Nᴏx")
         w = ui.welcome_kb().inline_keyboard
-        self.assertEqual(w[0][0].style, "success")
+        self.assertEqual(w[0][0].style, "primary")
         self.assertIn("Aᴅᴅ Tᴏ Gʀᴏᴜᴘ", w[0][0].text)
         self.assertIn("Qᴜᴇᴜᴇ", ui.queue_text(room(cur=trk(1), queue=[trk(2)])))
 

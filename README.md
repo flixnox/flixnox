@@ -1,3 +1,10 @@
+## v10: kya naya hai
+- **Buttons ke colour:** upar se row-by-row blue, green, blue, green... (Loop/Auto ON ho to label me ✔).
+- **Song bot me bhi:** player card pe **🎵 In Chat** button, song audio file ban ke isi chat me aa jata hai. **Open Player** se Mini App. Jisko jahan man kare.
+- **Mini App me song ka icon (cover) wapas:** `id="stage"` do jagah tha, screen-share wala art ko hide kar deta tha.
+- **Help ke andar pages:** Everyone / Admins / Private Player. Har command ek button, tap karo to popup me samjhega.
+- Update: files replace karo, `git add -A && git commit -m "v10" && git push`.
+
 ## v9: kya naya hai
 - **Private player:** bot ke private chat me gaane ka naam bhejo (ya `/play naam`). Results buttons me aate hain, ek tap pe tumhara apna player ban jata hai (album art, Pause/Skip/Queue/Loop/Auto/Stop) aur **Open Player** se Mini App me akele sunte ho.
 - Welcome message waisa hi hai, bas uski aur group room ki picture ab **spoiler** hai.

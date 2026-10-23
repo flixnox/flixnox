@@ -6,7 +6,7 @@ import time
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import CallbackQuery, ChatMemberUpdated, FSInputFile, InputMediaPhoto, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, ChatMemberUpdated, FSInputFile, InputMediaPhoto, Message
 
 from . import config, music, state, ui
 from .security import clean_text
@@ -200,10 +200,22 @@ async def start_private(m: Message):
     await send_banner(m.chat.id, ui.WELCOME.format(name=ui.esc(m.from_user.first_name[:30])), ui.welcome_kb(), spoiler=True)
 
 
+async def _edit_card(cb, text, markup):
+    """Edit the message the button sits on (photo caption or plain text) instead of sending a new one."""
+    try:
+        if cb.message.photo:
+            await cb.message.edit_caption(caption=text, reply_markup=markup)
+        else:
+            await cb.message.edit_text(text, reply_markup=markup)
+    except TelegramBadRequest as e:
+        if "not modified" not in str(e).lower():
+            await cb.message.answer(text, reply_markup=markup)
+
+
 @router.message(Command("help"))
 async def cmd_help(m: Message):
     if await guard(m):
-        await m.answer(ui.HELP)
+        await m.answer(ui.help_text(), reply_markup=ui.help_kb())
 
 
 @router.callback_query(F.data == "h")
@@ -211,7 +223,42 @@ async def cb_help(cb: CallbackQuery):
     if not await guard_cb(cb):
         return
     await cb.answer()
-    await cb.message.answer(ui.HELP)
+    await _edit_card(cb, ui.help_text(), ui.help_kb())
+
+
+@router.callback_query(F.data.startswith("hp:"))
+async def cb_help_page(cb: CallbackQuery):
+    if not await guard_cb(cb):
+        return
+    page = cb.data[3:]
+    await cb.answer()
+    await _edit_card(cb, ui.help_text(page), ui.help_kb(page))
+
+
+@router.callback_query(F.data.startswith("hc:"))
+async def cb_help_cmd(cb: CallbackQuery):
+    """A command button on a help page: show what it does in a small popup."""
+    if not await guard_cb(cb):
+        return
+    try:
+        _, page, j = cb.data.split(":")
+        cmd, desc = ui.HELP_PAGES[page][1][int(j)]
+    except (ValueError, KeyError, IndexError):
+        return await cb.answer()
+    await cb.answer(f"{cmd}\n\n{desc}"[:200], show_alert=True)
+
+
+@router.callback_query(F.data == "hb")
+async def cb_help_back(cb: CallbackQuery):
+    if not await guard_cb(cb):
+        return
+    await cb.answer()
+    if cb.message.chat.type == "private":
+        return await _edit_card(cb, ui.WELCOME.format(name=ui.esc(cb.from_user.first_name[:30])), ui.welcome_kb())
+    try:
+        await cb.message.delete()
+    except TelegramAPIError:
+        pass
 
 
 # ---------------- group: open the room ----------------
@@ -624,3 +671,34 @@ async def cb_pick(cb: CallbackQuery):
             break
         await asyncio.sleep(0.2)
     await send_solo_card(uid, room, (room.cur or t).get("cover"))
+
+
+@router.callback_query(F.data == "sa")
+async def cb_send_audio(cb: CallbackQuery):
+    """'In Chat': send the song that is playing as an audio file, so it can be heard right here in the bot chat."""
+    if not await guard_cb(cb):
+        return
+    uid = cb.from_user.id
+    room = rooms.get(uid, create=False)
+    t = room.cur if room else None
+    if t is None or not room.url:
+        return await cb.answer("Nothing is playing. Send a song name first.", show_alert=True)
+    await cb.answer("🎵 Sending the song…")
+    url = room.url
+    kw = dict(title=t.get("title", "")[:64], performer=t.get("artist", "")[:64], duration=int(t.get("dur") or 0) or None,
+              caption="🎧 " + ui.esc(ui.cut(t.get("title", ""), 60)))
+    try:
+        await bot.send_chat_action(uid, "upload_voice")
+        await bot.send_audio(uid, url, **kw)
+        return
+    except TelegramAPIError:
+        pass                                              # Telegram could not fetch the link itself: download it here and upload
+    try:
+        r = await music.client().get(url, timeout=40)
+        if r.status_code != 200 or not (20000 < len(r.content) < 45_000_000):
+            raise ValueError("bad audio")
+        name = "".join(c for c in t.get("title", "song") if c.isalnum() or c in " -_")[:40].strip() or "song"
+        await bot.send_audio(uid, BufferedInputFile(r.content, filename=name + ".mp3"), **kw)
+    except Exception as e:
+        log.warning("send audio failed: %s", e)
+        await cb.message.answer("😕 Couldn't send this song as audio. Try the Open Player button.")

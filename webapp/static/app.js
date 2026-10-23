@@ -124,7 +124,7 @@
     const k = key.split(":")[0], u = key.split(":")[1];
     if (r) { inc.delete(key); try { r.pc.close(); } catch (e) {} }
     if (k === "mic") { const el = document.getElementById("ra-" + u); if (el) el.remove(); levels.delete("u" + u); }
-    else { $("scr").srcObject = null; $("stage").hidden = !scrStream; }
+    else { $("scr").srcObject = null; $("sstage").hidden = !scrStream; }
   }
   function flush(r) { r.ready = true; const q = r.q; r.q = []; q.forEach((c) => r.pc.addIceCandidate(c).catch(() => {})); }
   async function startOut(k, uid, stream, j) {
@@ -178,7 +178,7 @@
       el.srcObject = stream; const p = el.play(); if (p && p.catch) p.catch(() => { $("tap").hidden = false; });
       watchLevel("u" + f, stream, f);
     } else {
-      const v = $("scr"); v.srcObject = stream; $("stage").hidden = false; v.play().catch(() => {});
+      const v = $("scr"); v.srcObject = stream; $("sstage").hidden = false; v.play().catch(() => {});
       const p = people.find((x) => x.id === f); $("stagetag").textContent = (p ? p.n : "someone") + " is sharing";
     }
   }
@@ -212,7 +212,7 @@
       const p = people.find((x) => x.id === +key.split(":")[1]);
       if (!p || (key.startsWith("mic:") ? !p.v : !p.s)) dropIn(key);
     });
-    if (!people.some((p) => p.s) && !scrStream) { $("scr").srcObject = null; $("stage").hidden = true; }
+    if (!people.some((p) => p.s) && !scrStream) { $("scr").srcObject = null; $("sstage").hidden = true; }
   }
   setInterval(() => { if (voice.on || voice.share) syncVoice(); }, 6000);       // retry failed links
   function onReconnect() { out.forEach((r, k) => dropOut(k)); if (voice.on || voice.share) vstate(); }
@@ -272,7 +272,7 @@
   function stopShare() {
     if (scrStream) scrStream.getTracks().forEach((t) => { t.onended = null; t.stop(); });
     scrStream = null; voice.share = false; vstate(); syncVoice(); renderVoice();
-    if (!people.some((p) => p.s)) $("stage").hidden = true;
+    if (!people.some((p) => p.s)) $("sstage").hidden = true;
   }
   async function toggleShare() {
     hap();
@@ -281,12 +281,12 @@
     try { scrStream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false }); }
     catch (e) { return; }
     voice.share = true; scrStream.getVideoTracks()[0].onended = stopShare;
-    const v = $("scr"); v.srcObject = scrStream; v.muted = true; $("stage").hidden = false; $("stagetag").textContent = "you are sharing";
+    const v = $("scr"); v.srcObject = scrStream; v.muted = true; $("sstage").hidden = false; $("stagetag").textContent = "you are sharing";
     vstate(); syncVoice(); renderVoice();
   }
   function onVDeny(m) {
     toast(m.m || "Not allowed right now", "err");
-    if (m.k === "s") { if (scrStream) scrStream.getTracks().forEach((t) => t.stop()); scrStream = null; voice.share = false; $("stage").hidden = true; }
+    if (m.k === "s") { if (scrStream) scrStream.getTracks().forEach((t) => t.stop()); scrStream = null; voice.share = false; $("sstage").hidden = true; }
     else leaveVoice();
     renderVoice();
   }
