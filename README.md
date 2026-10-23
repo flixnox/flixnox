@@ -1,3 +1,5 @@
+## v14: In Chat ab 2 message: upar player card (banner/cover SPOILER me + buttons), neeche asli music message. Next pe naya gaana neeche aata hai, card wahi update hota hai. Private player card ka cover bhi spoiler me.
+
 ## v13: search results ek gaana = ek button (small caps), jaisa bola tha.
 
 ## v12: player + search UI
