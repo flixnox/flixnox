@@ -27,6 +27,7 @@ def tc(text):
 
 
 DIV = "★▬▬▬▬▬▬▬▬▬▬▬▬★"
+DIVW = "★" + "▬" * 16 + "★"          # wider line for the audio card: makes its bubble as wide as the buttons
 
 
 def head(icon_title, status=""):
@@ -308,11 +309,12 @@ def solo_caption(room, audio=False):
         return "\n".join([head("🎧 <b>" + tc("your player") + "</b>", "⚪ <b>" + tc("idle") + "</b>"), DIV,
                            "🔎 <b>" + tc("send a song name to search") + "</b>", DIV, "💡 " + _code("shape of you")])
     t = room.cur
+    DV = DIVW if audio else DIV
     if audio:
         status = "💿 <b>" + tc("in chat") + "</b>"
     else:
         status = ("⏸ <b>" + tc("paused") + "</b>") if room.paused else ("🟢 <b>" + tc("playing") + "</b>")
-    lines = [head("🎧 <b>" + tc("your player") + "</b>", status), DIV,
+    lines = [head("🎧 <b>" + tc("your player") + "</b>", status), DV,
              f"🎵 <b>{esc(tc(cut(t.get('title'), 60)))}</b>",
              f"🎤 {esc(tc(cut(t.get('artist'), 44)))}"]
     if t.get("album"):
@@ -322,9 +324,9 @@ def solo_caption(room, audio=False):
         q = ["⏭ <b>" + tc("up next") + "</b>"] + [f"{i}. {esc(tc(cut(x['title'], 30)))} — {esc(sc(cut(x['artist'], 16)))}" for i, x in enumerate(room.queue[:3], 1)]
         if len(room.queue) > 3:
             q.append(f"+{len(room.queue) - 3} " + sc("more"))
-        lines += [DIV, "<blockquote>" + "\n".join(q) + "</blockquote>"]
+        lines += [DV, "<blockquote>" + "\n".join(q) + "</blockquote>"]
     flags = (["🔁 " + tc("loop")] if room.loop else []) + (["♾ " + tc("auto")] if room.autoplay else [])
-    lines += [DIV, ("  •  ".join(flags) + "\n" if flags else "") + "🔎 <i>" + _sent("send a song name to add more") + "</i>"]
+    lines += [DV, ("  •  ".join(flags) + "\n" if flags else "") + "🔎 <i>" + _sent("send a song name to add more") + "</i>"]
     text = "\n".join(lines)
     return text if len(text) <= 1000 else text[:990] + "…"
 

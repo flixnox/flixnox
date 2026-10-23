@@ -6,7 +6,7 @@ import time
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import BufferedInputFile, CallbackQuery, ChatMemberUpdated, FSInputFile, InputMediaPhoto, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, ChatMemberUpdated, FSInputFile, InputMediaAudio, InputMediaPhoto, Message
 
 from . import config, music, state, ui
 from .security import clean_text
@@ -104,9 +104,8 @@ async def send_banner(chat_id, caption, markup, spoiler=True, photo=None):
 # ---------------- room message auto-update (debounced): album art + caption + buttons ----------------
 _pending = {}
 _solo = {}                 # user id -> message id of their private player card
-_solo_kind = {}            # user id -> "audio" (the song itself is the card) or missing (photo card)
-_solo_audio = {}           # user id -> message id of the audio (music) message in chat mode
-_solo_key = {}             # user id -> which song the audio message holds
+_solo_kind = {}            # user id -> "audio" (the card IS the song, one music message) or missing (photo card)
+_solo_key = {}             # user id -> which song the audio card holds
 _audio_fid = {}            # song key -> Telegram file_id (re-sending is then instant)
 _shown_cover = {}          # chat_id -> cover url currently on the message (None = banner)
 
@@ -127,8 +126,18 @@ async def _update_panel(chat_id, delay=2.0):
             return
         room = rooms.get(chat_id, create=False)
         audio = solo and _solo_kind.get(chat_id) == "audio"
-        if audio and room is not None and room.cur is not None and room.url and _tkey(room.cur) != _solo_key.get(chat_id):
-            await send_audio_card(chat_id, room)                   # chat mode: the song changed, so the new song arrives below
+        if audio:
+            cap, kbd = ui.solo_caption(room, True), ui.solo_kb(chat_id, room, True)
+            if room is not None and room.cur is not None and room.url and _tkey(room.cur) != _solo_key.get(chat_id):
+                if await edit_audio_card(chat_id, mid, room, cap, kbd) is None:     # the same message turns into the next song
+                    await send_audio_card(chat_id, room)
+                return
+            try:
+                await bot.edit_message_caption(chat_id=chat_id, message_id=mid, caption=cap, reply_markup=kbd)
+            except TelegramBadRequest as e:
+                if "not modified" not in str(e).lower():
+                    _solo.pop(chat_id, None)
+            return
         caption = ui.solo_caption(room, audio) if solo else ui.panel_caption(room)
         markup = ui.solo_kb(chat_id, room, audio) if solo else ui.panel_kb(chat_id, room)
         cover = room.cur.get("cover") if room and room.cur else None
@@ -422,12 +431,6 @@ async def close_solo(uid):
     mid = _solo.pop(uid, None)
     _solo_kind.pop(uid, None)
     _solo_key.pop(uid, None)
-    amid = _solo_audio.pop(uid, None)
-    if amid:
-        try:
-            await bot.delete_message(uid, amid)
-        except TelegramAPIError:
-            pass
     if room is not None:
         await room.end()
         for c in list(room.clients.values()):
@@ -668,42 +671,84 @@ async def _fetch(url, limit, timeout=40):
     return None
 
 
+async def _audio_source(t, url):
+    """(file to send, cover thumbnail). A remembered file_id is instant; otherwise the song is downloaded and uploaded."""
+    key = _tkey(t)
+    if key in _audio_fid:
+        return _audio_fid[key], None
+    data = await _fetch(url, 45_000_000)
+    if not data:
+        return url, None                                         # last resort: let Telegram fetch the link
+    ext = ".mp3" if url.split("?")[0].lower().endswith(".mp3") else ".m4a"
+    name = ("".join(c for c in (t.get("title") or "song") if c.isalnum() or c in " -_")[:40].strip() or "song") + ext
+    thumb = None
+    if t.get("cover"):
+        img = await _fetch(t["cover"], 200_000, 8)
+        thumb = BufferedInputFile(img, filename="cover.jpg") if img else None
+    return BufferedInputFile(data, filename=name), thumb
+
+
+def _remember(t, msg):
+    audio = getattr(msg, "audio", None)
+    if audio:
+        if len(_audio_fid) > 300:
+            _audio_fid.pop(next(iter(_audio_fid)))
+        _audio_fid[_tkey(t)] = audio.file_id
+
+
+def _audio_meta(t):
+    return dict(title=(t.get("title") or "")[:64], performer=(t.get("artist") or "")[:64], duration=int(t.get("dur") or 0) or None)
+
+
 async def send_audio_card(uid, room):
-    """Chat mode: the song as a real Telegram music message (plays in Telegram's own player). It sits under the player card
-    and is replaced by the next song. No cover on it, so the picture stays hidden behind the card's spoiler."""
+    """Chat mode: ONE message that is the song itself (Telegram's own music player) with the caption and buttons under it.
+    It replaces the photo card; the next song replaces the song inside this same message."""
     t, url = room.cur, room.url
     if t is None or not url:
         return None
-    key = _tkey(t)
-    kw = dict(title=(t.get("title") or "")[:64], performer=(t.get("artist") or "")[:64], duration=int(t.get("dur") or 0) or None)
-    msg = None
     try:
         await bot.send_chat_action(uid, "upload_voice")
-        if key in _audio_fid:
-            msg = await bot.send_audio(uid, _audio_fid[key], **kw)
-        else:
-            data = await _fetch(url, 45_000_000)
-            if data:
-                ext = ".mp3" if url.split("?")[0].lower().endswith(".mp3") else ".m4a"
-                name = ("".join(c for c in (t.get("title") or "song") if c.isalnum() or c in " -_")[:40].strip() or "song") + ext
-                msg = await bot.send_audio(uid, BufferedInputFile(data, filename=name), **kw)
-            else:
-                msg = await bot.send_audio(uid, url, **kw)             # last resort: let Telegram fetch the link
+        src, thumb = await _audio_source(t, url)
+        kw = dict(caption=ui.solo_caption(room, True), reply_markup=ui.solo_kb(uid, room, True), **_audio_meta(t))
+        try:
+            msg = await bot.send_audio(uid, src, thumbnail=thumb, **kw)
+        except TelegramBadRequest:
+            msg = await bot.send_audio(uid, src, **kw)
     except TelegramAPIError as e:
         log.warning("audio send failed: %s", e)
         return None
-    if msg.audio:
-        if len(_audio_fid) > 300:
-            _audio_fid.pop(next(iter(_audio_fid)))
-        _audio_fid[key] = msg.audio.file_id
-    old = _solo_audio.get(uid)
-    _solo_audio[uid], _solo_key[uid] = msg.message_id, key
-    if old:
+    _remember(t, msg)
+    old = _solo.get(uid)
+    _solo[uid], _solo_kind[uid], _solo_key[uid] = msg.message_id, "audio", _tkey(t)
+    _shown_cover[uid] = None
+    if old and old != msg.message_id:
         try:
             await bot.delete_message(uid, old)
         except TelegramAPIError:
             pass
     return msg
+
+
+async def edit_audio_card(uid, mid, room, caption, markup):
+    """Swap the song inside the existing audio message (no new message), caption and buttons follow."""
+    t, url = room.cur, room.url
+    try:
+        src, thumb = await _audio_source(t, url)
+        try:
+            res = await bot.edit_message_media(chat_id=uid, message_id=mid, reply_markup=markup,
+                                               media=InputMediaAudio(media=src, thumbnail=thumb, caption=caption, **_audio_meta(t)))
+        except TelegramBadRequest as e:
+            if "not modified" in str(e).lower():
+                _solo_key[uid] = _tkey(t)
+                return True
+            res = await bot.edit_message_media(chat_id=uid, message_id=mid, reply_markup=markup,
+                                               media=InputMediaAudio(media=src, caption=caption, **_audio_meta(t)))
+    except TelegramAPIError as e:
+        log.warning("audio edit failed: %s", e)
+        return None
+    _remember(t, res)
+    _solo_key[uid] = _tkey(t)
+    return True
 
 
 @router.callback_query(F.data.startswith("ps:"))
@@ -726,14 +771,17 @@ async def cb_pick(cb: CallbackQuery):
         if room.cur is not None and (_solo_kind.get(uid) != "audio" or room.url):
             break
         await asyncio.sleep(0.2)
+    if _solo_kind.get(uid) == "audio":                      # chat mode stays chat mode: the same music message turns into the new song
+        if _solo.get(uid):
+            return await _update_panel(uid, 0)
+        if await send_audio_card(uid, room) is not None:
+            return
     await send_solo_card(uid, room, (room.cur or t).get("cover"))
-    if _solo_kind.get(uid) == "audio" and room.cur is not None and room.url and _tkey(room.cur) != _solo_key.get(uid):
-        await send_audio_card(uid, room)                    # chat mode stays chat mode: the new song arrives as music again
 
 
 @router.callback_query(F.data == "sa")
 async def cb_send_audio(cb: CallbackQuery):
-    """In Chat: the song is sent as a real music message under the card; the card keeps its (spoiler) picture and buttons."""
+    """In Chat: the player card turns into the song itself (one real music message, buttons under it)."""
     if not await guard_cb(cb):
         return
     uid = cb.from_user.id
@@ -741,8 +789,5 @@ async def cb_send_audio(cb: CallbackQuery):
     if room is None or room.cur is None or not room.url:
         return await cb.answer("Nothing is playing. Send a song name first.", show_alert=True)
     await cb.answer("🎵 Sending the song…")
-    _solo_kind[uid] = "audio"
     if await send_audio_card(uid, room) is None:
-        _solo_kind.pop(uid, None)
         return await cb.message.answer("😕 Couldn't send this song in chat. Try the Open Player button.")
-    await _update_panel(uid, 0)                             # card: status 'in chat', buttons without pause
