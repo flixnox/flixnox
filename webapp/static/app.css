@@ -212,3 +212,8 @@ html.lite .amb,html.lite .orb,html.lite .ring{display:none!important}
 html.lite .glass,html.lite .eq,html.lite .sheetbg,html.lite .veil,html.slim .glass,html.slim .eq,html.slim .sheetbg,html.slim .veil{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
 html.slim .glass{background:rgba(255,255,255,.93)}
 html.slim .amb,html.slim .orb{display:none!important}
+
+/* ---------- private player (opened from a chat with the bot): no group features ---------- */
+.solo .tab[data-tab="people"], .solo .pill, .solo #inv, .solo #invbtn{display:none}
+.solo .nav{grid-template-columns:repeat(3,1fr)}
+.solo .slider{width:calc((100% - 12px)/3)}

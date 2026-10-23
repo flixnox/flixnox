@@ -83,11 +83,17 @@ def _temp(msg, secs=45):
     rooms.spawn(_go())
 
 
-async def send_banner(chat_id, caption, markup):
+async def send_banner(chat_id, caption, markup, spoiler=True, photo=None):
+    """Picture + caption + buttons. The picture is hidden behind a spoiler until someone taps it."""
     global _banner_id
+    if photo:
+        try:
+            return await bot.send_photo(chat_id, photo, caption=caption, reply_markup=markup, has_spoiler=spoiler)
+        except TelegramAPIError:
+            pass                                          # cover not reachable: fall back to the banner
     try:
         src = _banner_id or FSInputFile("assets/banner.jpg")
-        msg = await bot.send_photo(chat_id, src, caption=caption, reply_markup=markup)
+        msg = await bot.send_photo(chat_id, src, caption=caption, reply_markup=markup, has_spoiler=spoiler)
         _banner_id = msg.photo[-1].file_id
         return msg
     except (FileNotFoundError, TelegramBadRequest):
@@ -97,6 +103,7 @@ async def send_banner(chat_id, caption, markup):
 
 # ---------------- room message auto-update (debounced): album art + caption + buttons ----------------
 _pending = {}
+_solo = {}                 # user id -> message id of their private player card
 _shown_cover = {}          # chat_id -> cover url currently on the message (None = banner)
 
 
@@ -109,17 +116,19 @@ async def _update_panel(chat_id):
     try:
         await asyncio.sleep(2.0)
         _pending.pop(chat_id, None)
-        mid = store.group(chat_id).get("panel")
+        solo = chat_id > 0                                     # a private player, not a group room
+        mid = _solo.get(chat_id) if solo else store.group(chat_id).get("panel")
         if not mid:
             return
         room = rooms.get(chat_id, create=False)
-        caption, markup = ui.panel_caption(room), ui.panel_kb(chat_id, room)
+        caption = ui.solo_caption(room) if solo else ui.panel_caption(room)
+        markup = ui.solo_kb(chat_id, room) if solo else ui.panel_kb(chat_id, room)
         cover = room.cur.get("cover") if room and room.cur else None
         if cover != _shown_cover.get(chat_id) and (cover or _banner_id):
             _shown_cover[chat_id] = cover                      # set first: never retry the same picture in a loop
             try:
                 await bot.edit_message_media(chat_id=chat_id, message_id=mid, reply_markup=markup,
-                                             media=InputMediaPhoto(media=cover or _banner_id, caption=caption))
+                                             media=InputMediaPhoto(media=cover or _banner_id, caption=caption, has_spoiler=not solo))
                 return
             except TelegramBadRequest as e:
                 if "not modified" in str(e).lower():
@@ -131,7 +140,10 @@ async def _update_panel(chat_id):
             if "no caption" in s:
                 await bot.edit_message_text(caption, chat_id=chat_id, message_id=mid, reply_markup=markup)
             elif "not found" in s or "can't be edited" in s:
-                store.set_group(chat_id, panel=None)
+                if solo:
+                    _solo.pop(chat_id, None)
+                else:
+                    store.set_group(chat_id, panel=None)
     except TelegramBadRequest:
         pass
     except Exception as e:
@@ -185,7 +197,7 @@ async def start_private(m: Message):
     if not await guard(m):
         return
     store.touch_user(m.from_user)
-    await send_banner(m.chat.id, ui.WELCOME.format(name=ui.esc(m.from_user.first_name[:30])), ui.welcome_kb())
+    await send_banner(m.chat.id, ui.WELCOME.format(name=ui.esc(m.from_user.first_name[:30])), ui.welcome_kb(), spoiler=True)
 
 
 @router.message(Command("help"))
@@ -219,7 +231,7 @@ async def start_group(m: Message):
     room = rooms.get(m.chat.id)
     if room is None:
         return await m.reply("I'm very busy right now. Please try again in a minute.")
-    msg = await send_banner(m.chat.id, ui.panel_caption(room), ui.panel_kb(m.chat.id, room))
+    msg = await send_banner(m.chat.id, ui.panel_caption(room), ui.panel_kb(m.chat.id, room), spoiler=True)
     store.set_group(m.chat.id, panel=msg.message_id, dead=False)
     _shown_cover[m.chat.id] = None
     try:
@@ -362,7 +374,27 @@ for _c, _f, _t in (("skip", "skip", "⏭ Skipped."), ("pause", "pause", "⏸ Pau
 
 
 # ---------------- /end: the room lives from /start until an admin ends it ----------------
+async def close_solo(uid):
+    """Stop button in a private chat: music stops, the Mini App closes, the card says so."""
+    room = rooms.get(uid, create=False)
+    mid = _solo.pop(uid, None)
+    if room is not None:
+        await room.end()
+        for c in list(room.clients.values()):
+            await c.send({"t": "fatal", "m": "Your player was stopped. Send a song name to the bot to start again."})
+            await c.close()
+        rooms.drop(uid)
+    _shown_cover.pop(uid, None)
+    if mid:
+        try:
+            await bot.edit_message_caption(chat_id=uid, message_id=mid, caption=ui.solo_closed(), reply_markup=None)
+        except TelegramAPIError:
+            pass
+
+
 async def close_room(chat_id):
+    if chat_id > 0:
+        return await close_solo(chat_id)
     mid = store.group(chat_id).get("panel")
     room = rooms.get(chat_id, create=False)
     store.set_group(chat_id, panel=None)                  # first: /play and new joins are refused from now on
@@ -403,24 +435,32 @@ async def cmd_end(m: Message):
 
 
 # ---------------- buttons on the room message ----------------
-@router.callback_query(F.data.in_({"pp", "sk", "lp", "sh", "ap", "st"}))
+@router.callback_query(F.data.in_({"pp", "sk", "lp", "sh", "ap", "st", "sx"}))
 async def cb_panel(cb: CallbackQuery):
     if not await guard_cb(cb):
         return
     chat = cb.message.chat
-    if chat.type not in GROUPS:
+    solo = chat.type == "private"
+    if chat.type not in GROUPS and not solo:
         return await cb.answer()
-    if not await is_admin(chat.id, cb.from_user.id):
+    if not solo and not await is_admin(chat.id, cb.from_user.id):
         return await cb.answer("🔒 Only group admins can use this button.", show_alert=True)
     d = cb.data
+    if d == "sx":
+        if not solo:
+            return await cb.answer()
+        await close_solo(chat.id)
+        return await cb.answer("⏹ Stopped")
     if d == "st":
+        if solo:
+            return await cb.answer()
         g = store.group(chat.id)
         await cb.answer()
         msg = await cb.message.answer(ui.settings_text(g), reply_markup=ui.settings_kb(g))
         return _temp(msg, 120)
-    r = rooms.get(chat.id)
+    r = rooms.get(chat.id, create=False) if solo else rooms.get(chat.id)
     if r is None:
-        return await cb.answer("I'm busy right now, try again in a minute.", show_alert=True)
+        return await cb.answer("Your player isn't running. Send a song name to start it." if solo else "I'm busy right now, try again in a minute.", show_alert=True)
     if d == "ap":
         return await cb.answer("♾ Autoplay on" if await r.toggle_autoplay() else "Autoplay off")
     if r.cur is None:
@@ -522,3 +562,65 @@ async def my_member(ev: ChatMemberUpdated):
             u = ev.from_user
             if u:
                 store.touch_user(u)
+
+
+# ---------------- private chat: search songs here, listen alone in your own Mini App ----------------
+async def private_search(m: Message, q: str):
+    q = clean_text(q or "", 80)
+    if len(q) < 2:
+        return await m.answer("🔎 <b>" + ui.tc("send me a song or artist name") + "</b>\n<i>For example:</i> <code>kesariya</code>")
+    songs = await music.search(q, 8)
+    if not songs:
+        return await m.answer("😕 No results. Try the artist name too.")
+    items = music.stash(m.from_user.id, songs)
+    await m.answer(ui.results_text(q), reply_markup=ui.results_kb(items, m.from_user.id))
+
+
+@router.message(Command("play", "search"), F.chat.type == "private")
+async def cmd_play_private(m: Message, command: CommandObject):
+    if await guard(m):
+        store.touch_user(m.from_user)
+        await private_search(m, command.args)
+
+
+@router.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
+async def text_private(m: Message):
+    if await guard(m):
+        store.touch_user(m.from_user)
+        await private_search(m, m.text)
+
+
+async def send_solo_card(uid, room, cover):
+    """One player card, always the newest message: old one is removed, the new one shows the album art."""
+    old = _solo.pop(uid, None)
+    if old:
+        try:
+            await bot.delete_message(uid, old)
+        except TelegramAPIError:
+            pass
+    msg = await send_banner(uid, ui.solo_caption(room), ui.solo_kb(uid, room), spoiler=False, photo=cover)
+    _solo[uid] = msg.message_id
+    _shown_cover[uid] = cover if msg.photo and cover else None
+
+
+@router.callback_query(F.data.startswith("ps:"))
+async def cb_pick(cb: CallbackQuery):
+    if not await guard_cb(cb):
+        return
+    uid = cb.from_user.id
+    t = music.take(cb.data[3:], uid)
+    if t is None:
+        return await cb.answer("These results expired. Search again.", show_alert=True)
+    room = rooms.get(uid)
+    if room is None:
+        return await cb.answer("I'm busy right now, try again in a minute.", show_alert=True)
+    t.update(by=clean_text(cb.from_user.first_name, 30), by_id=uid, src="p")
+    pos = room.add(t)
+    if pos is None:
+        return await cb.answer("The queue is full.", show_alert=True)
+    await cb.answer("▶ Starting…" if pos == "start" else f"➕ Added at #{pos}")
+    for _ in range(25):                                     # wait for the first song to be picked up (about a second)
+        if room.cur is not None:
+            break
+        await asyncio.sleep(0.2)
+    await send_solo_card(uid, room, (room.cur or t).get("cover"))

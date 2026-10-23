@@ -95,7 +95,10 @@ class Room:
         """The room keeps running (until /end) even when nobody is inside. Joining again syncs to the live position."""
         if self.clients.get(client.uid) is client:
             del self.clients[client.uid]
-        await self.push()
+        if self.chat_id > 0 and not self.clients:
+            await self.pause(auto=True)               # private player: waits until you open it again
+        else:
+            await self.push()
         self.people_changed()
 
     # ---- queue ----
@@ -180,7 +183,10 @@ class Room:
                 self.pos0, self.t0, self.paused, self.auto_paused = 0.0, time.time(), False, False
                 self.seq += 1
                 self.ended_votes, self.bad_votes, self.durs = set(), set(), {}
-                self._arm_wd()
+                if self.chat_id > 0 and not self.clients:
+                    self.paused = self.auto_paused = True   # private player: starts the moment you open the Mini App
+                else:
+                    self._arm_wd()
                 self.mgr.on_play(self, t)
                 self._prefetch()
                 return True

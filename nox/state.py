@@ -43,13 +43,13 @@ async def _status(chat_id, user_id):
 
 
 async def is_admin(chat_id, user_id):
-    if user_id in config.OWNER_IDS:
+    if user_id in config.OWNER_IDS or chat_id == user_id:      # chat_id == user_id: your private player
         return True
     return (await _status(chat_id, user_id))[0] in ("creator", "administrator")
 
 
 async def is_member(chat_id, user_id):
-    if user_id in config.OWNER_IDS:
+    if user_id in config.OWNER_IDS or chat_id == user_id:
         return True
     st, joined = await _status(chat_id, user_id)
     return st in ("creator", "administrator", "member") or (st == "restricted" and joined)

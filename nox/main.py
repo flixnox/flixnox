@@ -33,7 +33,7 @@ _tasks = set()
 
 CSP = ("default-src 'none'; script-src 'self' https://telegram.org; style-src 'self' https://fonts.googleapis.com; "
        "font-src https://fonts.gstatic.com; img-src 'self' https: data:; media-src https: blob:; "
-       f"connect-src 'self' wss://{config.PUBLIC_HOST}; base-uri 'none'; form-action 'none'; "
+       f"connect-src 'self' wss://{config.PUBLIC_HOST} https://*.saavncdn.com; base-uri 'none'; form-action 'none'; "
        "frame-ancestors https://web.telegram.org https://*.telegram.org")
 SEC_HEADERS = {
     "Content-Security-Policy": CSP, "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer",
@@ -188,17 +188,18 @@ async def ws_endpoint(ws: WebSocket):
         user = info["user"]
         uid = user["id"]
         chat_id = security.decode_room(info["start_param"])
-        if chat_id is None or chat_id >= 0:
+        solo = chat_id is not None and chat_id == uid           # your own private player (opened from a chat with the bot)
+        if chat_id is None or (chat_id >= 0 and not solo):
             return await fatal("This room link isn't valid.")
         if uid not in config.OWNER_IDS:
             if store.get_kv("maint", False):
                 return await fatal("Sonic Nox is under maintenance. Please try again soon.")
-            if store.is_banned("u", uid) or store.is_banned("g", chat_id) or penalty.blocked(uid):
+            if store.is_banned("u", uid) or (not solo and store.is_banned("g", chat_id)) or penalty.blocked(uid):
                 return await fatal("You can't use this room.")
         if not await state.is_member(chat_id, uid):
             return await fatal("Join the group to listen in its room.")
-        g = store.group(chat_id)
-        if not g.get("panel") or g.get("dead"):
+        g = {"title": "Your player"} if solo else store.group(chat_id)
+        if not solo and (not g.get("panel") or g.get("dead")):
             return await fatal("This room isn't open. Ask an admin to send /start in the group.")
         room = rooms.get(chat_id)
         if room is None:
@@ -208,7 +209,7 @@ async def ws_endpoint(ws: WebSocket):
         client = Client(ws, user)
         admin_now = await state.is_admin(chat_id, uid)
         client.adm = admin_now
-        await client.send({"t": "hello", "admin": admin_now, "id": uid, "ice": config.ICE, "room": g.get("title", "")[:60],
+        await client.send({"t": "hello", "admin": admin_now, "id": uid, "solo": solo, "ice": config.ICE, "room": g.get("title", "")[:60],
                            "me": clean_text(user.get("first_name", ""), 32),
                            "link": f"https://t.me/{config.BOT_USERNAME}/{config.MINIAPP_SHORT}?startapp={security.encode_room(chat_id)}"})
         await room.join(client)
@@ -309,7 +310,7 @@ async def handle(t, js, room, client, chat_id, uid, name):
         return await send({"t": "results", "id": rid if isinstance(rid, int) else None, "q": q, "artist": by_artist, "items": music.stash(uid, songs), "artists": artists})
 
     if t == "add":
-        g = store.group(chat_id)
+        g = {"play": "all"} if chat_id > 0 else store.group(chat_id)
         if g["play"] == "admins" and not await state.is_admin(chat_id, uid):
             return await send({"t": "err", "m": "Only admins can add songs in this group."})
         track = music.take(js.get("token"), uid)

@@ -37,8 +37,21 @@ def head(icon_title, status=""):
 P, S, D = "primary", "success", "danger"      # blue, green, red  (the only colours Telegram allows)
 
 
-def btn(text, cb=None, url=None, style=P, small=True):
-    kw = {"text": tc(text) if small else text}
+def spread(label):
+    """'pause' -> 'ᴘ ᴀ ᴜ ꜱ ᴇ' with thin spaces, so the label fills the button instead of floating in the middle."""
+    return "\u2003".join("\u2009".join(sc(w)) for w in str(label).split(" ") if w)
+
+
+def wide(text, full=False):
+    """'⏸ Pause' -> '⏸ ᴘ ᴀ ᴜ ꜱ ᴇ'. Full-width buttons also get ≡ bars at both ends."""
+    parts = str(text).split(" ", 1)
+    icon, label = (parts[0], parts[1]) if len(parts) == 2 and not parts[0].isalpha() else ("", str(text))
+    core = (icon + " " if icon else "") + spread(label)
+    return f"≡ {core} ≡" if full else core
+
+
+def btn(text, cb=None, url=None, style=P, small=True, fill=None):
+    kw = {"text": wide(text, full=(fill == "full")) if fill else (tc(text) if small else text)}
     if cb:
         kw["callback_data"] = cb
     if url:
@@ -115,15 +128,16 @@ def panel_kb(chat_id, room=None):
     loop_on = bool(room and room.loop)
     auto_on = bool(room and room.autoplay)
     return kb(
-        [btn("≡ 🎧 Join Room ≡", url=join_url(chat_id), style=P)],
-        [btn("▶ Resume" if paused else "⏸ Pause", cb="pp", style=S), btn("⏭ Skip", cb="sk", style=P)],
-        [btn("📜 Queue", cb="q", style=P), btn("🔁 Loop", cb="lp", style=S if loop_on else P), btn("🔀 Shuffle", cb="sh", style=P)],
-        [btn("♾ Auto", cb="ap", style=S if auto_on else P), btn("📨 Invite", cb="inv", style=S), btn("⚙ More", cb="st", style=P)],
+        [btn("🎧 Join Room", url=join_url(chat_id), style=P, fill="full")],
+        [btn("▶ Resume" if paused else "⏸ Pause", cb="pp", style=S, fill="half"), btn("⏭ Skip", cb="sk", style=P, fill="half")],
+        [btn("📜 Queue", cb="q", style=P, fill="half"), btn("🔁 Loop", cb="lp", style=S if loop_on else P, fill="half")],
+        [btn("🔀 Shuffle", cb="sh", style=P, fill="half"), btn("♾ Auto", cb="ap", style=S if auto_on else P, fill="half")],
+        [btn("📨 Invite", cb="inv", style=S, fill="half"), btn("⚙ More", cb="st", style=P, fill="half")],
     )
 
 
-def join_kb(chat_id, label="≡ 🎧 Join Room ≡"):
-    return kb([btn(label, url=join_url(chat_id), style=P)])
+def join_kb(chat_id, label="🎧 Join Room"):
+    return kb([btn(label, url=join_url(chat_id), style=P, fill="full")])
 
 
 def _track_lines(t, show_by=True):
@@ -222,3 +236,51 @@ def closed_caption():
 
 def ended_text():
     return "\n".join([head("⏹ <b>" + tc("room closed") + "</b>"), DIV, "▶️ " + tc("send /start to open it again")])
+
+
+# ---------------- your private player (search in the bot, listen alone in the Mini App) ----------------
+def solo_caption(room):
+    if room is None or room.cur is None:
+        return "\n".join([head("🎧 <b>" + tc("your player") + "</b>", "⚪ <b>" + tc("idle") + "</b>"), DIV,
+                           "🔎 <b>" + tc("send a song name to search") + "</b>", DIV, "💡 " + _code("shape of you")])
+    t = room.cur
+    status = ("⏸ <b>" + tc("paused") + "</b>") if room.paused else ("🟢 <b>" + tc("playing") + "</b>")
+    lines = [head("🎧 <b>" + tc("your player") + "</b>", status), DIV] + _track_lines(t, False)
+    if room.queue:
+        q = ["<b>" + tc("up next") + "</b>"] + [f"{i}. {esc(cut(x['title'], 38))} — {esc(cut(x['artist'], 20))}" for i, x in enumerate(room.queue[:3], 1)]
+        if len(room.queue) > 3:
+            q.append(f"+{len(room.queue) - 3} more")
+        lines += [DIV, "<blockquote>" + "\n".join(q) + "</blockquote>"]
+    flags = (["🔁 " + tc("loop")] if room.loop else []) + (["♾ " + tc("auto")] if room.autoplay else [])
+    lines += [DIV, ("  •  ".join(flags) + "\n" if flags else "") + "🔎 <i>Send a song name to add more</i>"]
+    text = "\n".join(lines)
+    return text if len(text) <= 1000 else text[:990] + "…"
+
+
+def solo_kb(uid, room=None):
+    paused = bool(room and room.paused)
+    loop_on = bool(room and room.loop)
+    auto_on = bool(room and room.autoplay)
+    return kb(
+        [btn("📲 Open Player", url=join_url(uid), style=P, fill="full")],
+        [btn("▶ Resume" if paused else "⏸ Pause", cb="pp", style=S, fill="half"), btn("⏭ Skip", cb="sk", style=P, fill="half")],
+        [btn("📜 Queue", cb="q", style=P, fill="half"), btn("🔁 Loop", cb="lp", style=S if loop_on else P, fill="half")],
+        [btn("♾ Auto", cb="ap", style=S if auto_on else P, fill="half"), btn("⏹ Stop", cb="sx", style=D, fill="half")],
+    )
+
+
+def results_text(q):
+    return "\n".join([head("🔎 <b>" + tc("search results") + "</b>"), DIV, f"🎵 <b>{esc(cut(q, 60))}</b>", "<i>Tap a song to play it in your player.</i>"])
+
+
+def results_kb(items, uid):
+    rows = []
+    for it in items[:8]:
+        label = f"🎵 {cut(it['title'], 30)} · {cut(it['artist'], 16)}"
+        rows.append([btn(label, cb="ps:" + it["token"], style=P, small=False)])
+    rows.append([btn("📲 Open Player", url=join_url(uid), style=S, fill="full")])
+    return kb(*rows)
+
+
+def solo_closed():
+    return "\n".join([head("⏹ <b>" + tc("player stopped") + "</b>"), DIV, "Send me a song name whenever you want to listen again."])

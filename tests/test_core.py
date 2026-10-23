@@ -91,6 +91,27 @@ class RoomTests(unittest.IsolatedAsyncioTestCase):
         for _ in range(10):
             await asyncio.sleep(0)
 
+    async def test_private_player_waits_for_its_listener(self):
+        solo = self.mgr.get(555)                       # positive id = a user's private player
+        solo.add(self.track("one"))
+        await self.settle()
+        self.assertEqual(solo.cur["title"], "one")
+        self.assertTrue(solo.paused)                   # nobody has opened the Mini App yet: it waits at 0:00
+        a = FakeClient(555)
+        await solo.join(a)
+        self.assertFalse(solo.paused)                  # opening the Mini App starts the song
+        await solo.leave(a)
+        self.assertTrue(solo.paused)                   # leaving pauses it again
+        self.assertEqual(round(solo.position()), 0)
+
+    async def test_group_room_keeps_running_when_empty(self):
+        a = FakeClient(1)
+        await self.room.join(a)
+        self.room.add(self.track("one"))
+        await self.settle()
+        await self.room.leave(a)
+        self.assertFalse(self.room.paused)             # a group room runs until /end
+
     async def test_flow(self):
         a, b = FakeClient(1), FakeClient(2)
         await self.room.join(a)

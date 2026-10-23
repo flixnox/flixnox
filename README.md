@@ -1,3 +1,10 @@
+## v9: kya naya hai
+- **Private player:** bot ke private chat me gaane ka naam bhejo (ya `/play naam`). Results buttons me aate hain, ek tap pe tumhara apna player ban jata hai (album art, Pause/Skip/Queue/Loop/Auto/Stop) aur **Open Player** se Mini App me akele sunte ho.
+- Welcome message waisa hi hai, bas uski aur group room ki picture ab **spoiler** hai.
+- Buttons: 2-2 ek row me, label ke akshar phaile hue taaki button bhara-bhara lage.
+- Awaaz atakna (background / screen off): jab app background me ho tab ab room-clock ke peeche bhagna (seek / speed change) band hai, aur agla gaana memory me pehle se download hota hai, isliye gaana badalte waqt rukta nahi.
+- Update: files replace karo, `git add -A && git commit -m "v9" && git push`.
+
 # Sonic Nox: live listening rooms for Telegram groups
 
 ## v2: kya naya hai (purane repo par update kaise karein)

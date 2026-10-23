@@ -312,8 +312,24 @@
 
   // ---------- audio sync (everyone hears the same second) ----------
   // Smooth, not jumpy: small drift is fixed by a tiny speed change, a seek only happens for big drift, and never while buffering.
-  let lastSeek = 0, lastRetry = 0;
+  let lastSeek = 0, lastRetry = 0, lastStall = 0, bgApp = false, curUrl = "";
+  const away = () => document.hidden || bgApp;                       // screen off, or Telegram/Nekogram in the background
   au.preload = "auto";
+  // While the app is away the phone throttles our timers and network. Chasing the room clock then (seek / speed change)
+  // is exactly what made the sound stop and stutter, so in the background the song is simply left alone to play.
+  ["waiting", "stalled"].forEach((ev) => au.addEventListener(ev, () => { lastStall = Date.now(); }));
+  // The next song is downloaded into memory early, so it starts at once and cannot stall on a weak or throttled connection.
+  const blobs = new Map(), noBlob = new Set(); let fetching = "";
+  function prefetch(url) {
+    if (!url || blobs.has(url) || noBlob.has(url) || fetching === url || !window.fetch || !URL.createObjectURL) return;
+    fetching = url;
+    fetch(url, { mode: "cors" }).then((r) => { if (!r.ok) throw 0; return r.blob(); }).then((b) => {
+      if (b.size < 20000 || b.size > 14e6) throw 0;
+      blobs.set(url, URL.createObjectURL(b));
+      while (blobs.size > 3) { const k = blobs.keys().next().value; if (k === curUrl) break; try { URL.revokeObjectURL(blobs.get(k)); } catch (e) {} blobs.delete(k); }
+    }).catch(() => { noBlob.add(url); }).finally(() => { if (fetching === url) fetching = ""; });
+  }
+  const srcFor = (url) => blobs.get(url) || url;
   function seekTo(t) { try { if (au.readyState >= 1) { au.currentTime = Math.max(0, t); lastSeek = Date.now(); } } catch (e) {} }
   function play() {
     if (localOff || !st || st.paused) return;
@@ -324,17 +340,18 @@
   function loadTrack() {
     badSent = -1; au.playbackRate = 1;
     au.onloadedmetadata = () => { send({ t: "meta", seq: st.seq, dur: au.duration }); seekTo(want()); play(); };
-    au.src = st.url; au.load();
+    curUrl = st.url; au.src = srcFor(st.url); au.load();
   }
   function syncAudio() {
     if (!st || !st.track || !au.src) return;
     if (st.paused || localOff) { if (!au.paused) au.pause(); au.playbackRate = 1; return; }
     if (au.paused && au.readyState >= 2 && $("tap").hidden) play();
-    if (au.readyState < 3) return;                                   // still buffering: never fight it, catch up after
+    if (away() || Date.now() - lastStall < 20000) { if (au.playbackRate !== 1) au.playbackRate = 1; return; }
+    if (au.readyState < 3 || au.seeking) return;                     // still buffering: never fight it
     const d = want() - au.currentTime, a = Math.abs(d);
-    if (a > 3) { if (Date.now() - lastSeek > 5000) { seekTo(want() + 0.3); au.playbackRate = 1; } }
-    else if (a > 0.4) au.playbackRate = d > 0 ? 1.04 : 0.96;         // gently speed up / slow down
-    else if (a < 0.15) au.playbackRate = 1;
+    if (a > 8) { if (Date.now() - lastSeek > 15000) { seekTo(want() + 0.3); au.playbackRate = 1; } }   // only a really big gap is jumped
+    else if (a > 0.7) au.playbackRate = d > 0 ? 1.03 : 0.97;         // otherwise ±3% speed, which you cannot hear
+    else if (a < 0.2) au.playbackRate = 1;
   }
   function recover() {                                              // after the app was in the background the old connection is often dead
     if (!st || !st.track || !st.url || localOff || st.paused) return;
@@ -342,7 +359,7 @@
   }
   let stuckSince = 0, lastRecover = 0;
   function watchStuck() {
-    if (!st || !st.track || st.paused || localOff || !$("tap").hidden) { stuckSince = 0; return; }
+    if (!st || !st.track || st.paused || localOff || !$("tap").hidden || away()) { stuckSince = 0; return; }   // never reload while away
     const bad = au.paused || au.readyState < 2;
     if (!bad) { stuckSince = 0; return; }
     if (!stuckSince) stuckSince = Date.now();
@@ -350,6 +367,8 @@
   }
   function warmNext() {                                              // preload the next song only near the end, so it never competes with the current one
     if (!st || !st.track || !st.nxt || st.nxt === nxtUrl) return;
+    prefetch(st.nxt);                                                // into memory if the server allows it
+    if (!noBlob.has(st.nxt)) return;                                 // blocked: fall back to warming the browser cache near the end
     const left = (isFinite(au.duration) && au.duration > 0 ? au.duration : (st.track.dur || 0)) - want();
     if (left > 0 && left < 30) { nxtUrl = st.nxt; pre.preload = "auto"; pre.src = st.nxt; }
   }
@@ -359,12 +378,12 @@
     send({ t: "ended", seq: st.seq });
     if (st.nxt && !st.loop && !localOff && !localNext) {              // don't wait for the server (screen off / slow link): start the next song right now
       localNext = true; badSent = -1; au.playbackRate = 1;
-      au.src = st.nxt; au.load(); const p = au.play(); if (p && p.catch) p.catch(() => {});
+      curUrl = st.nxt; au.src = srcFor(st.nxt); au.load(); const p = au.play(); if (p && p.catch) p.catch(() => {});
     }
   };
   au.onerror = () => { if (st && st.track && badSent !== st.seq) { badSent = st.seq; send({ t: "bad", seq: st.seq }); } };
   au.addEventListener("pause", () => {                               // screen off / app in background: try to keep the music going
-    if (!st || !st.track || st.paused || localOff || au.ended || !document.hidden || Date.now() - lastRetry < 2000) return;
+    if (!st || !st.track || st.paused || localOff || au.ended || !document.hidden || Date.now() - lastRetry < 6000) return;
     lastRetry = Date.now();
     setTimeout(() => { if (au.paused && !localOff && st && !st.paused) { const p = au.play(); if (p && p.catch) p.catch(() => {}); } }, 300);
   });
@@ -376,7 +395,7 @@
     renderNow(); renderQueue(); renderMini();
     localNext = false;
     if (!m.track) { au.pause(); au.removeAttribute("src"); return; }
-    if (isNew && au.src && au.src === m.url && !au.error && au.readyState >= 2) { badSent = -1; syncAudio(); }   // already playing this song (moved on by itself)
+    if (isNew && au.src && curUrl === m.url && !au.error && au.readyState >= 2) { badSent = -1; syncAudio(); }   // already playing this song (moved on by itself)
     else if (isNew) loadTrack(); else syncAudio();
   }
 
@@ -450,10 +469,10 @@
   // light mode while the app is in the background: far less GPU/memory, so Android is less likely to kill the page ("Aw, Snap!")
   const root = document.documentElement;
   try { if ((navigator.deviceMemory && navigator.deviceMemory <= 4) || (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4)) root.classList.add("slim"); } catch (e) {}
-  function wake() { root.classList.remove("lite"); recover(); if (!ws || ws.readyState > 1) connect(); resumeVoice(); }
-  document.addEventListener("visibilitychange", () => { if (document.hidden) root.classList.add("lite"); else wake(); });
-  try { if (tg && tg.onEvent) tg.onEvent("deactivated", () => root.classList.add("lite")); } catch (e) {}
-  try { if (tg && tg.onEvent) tg.onEvent("activated", wake); } catch (e) {}
+  function wake() { root.classList.remove("lite"); if (!document.hidden) bgApp = false; recover(); if (!ws || ws.readyState > 1) connect(); resumeVoice(); }
+  document.addEventListener("visibilitychange", () => { if (document.hidden) root.classList.add("lite"); else { lastStall = Date.now(); wake(); } });
+  try { if (tg && tg.onEvent) tg.onEvent("deactivated", () => { bgApp = true; root.classList.add("lite"); }); } catch (e) {}
+  try { if (tg && tg.onEvent) tg.onEvent("activated", () => { bgApp = false; lastStall = Date.now(); wake(); }); } catch (e) {}
   window.addEventListener("pageshow", wake); window.addEventListener("online", wake);
 
   // ---------- render: queue ----------
@@ -619,6 +638,7 @@
     switch (m.t) {
       case "hello":
         admin = !!m.admin; roomLink = m.link || ""; meId = m.id || 0; if (Array.isArray(m.ice) && m.ice.length) ice = m.ice; onReconnect(); backoff = 1000; setConn(""); $("room").textContent = m.room || "live room";
+        if (m.solo) { document.documentElement.classList.add("solo"); $("room").textContent = "private player"; }
         clearInterval(hb); send({ t: "ping", c: Date.now() });
         setTimeout(() => send({ t: "ping", c: Date.now() }), 600);
         hb = setInterval(() => send({ t: "ping", c: Date.now() }), 20000);
