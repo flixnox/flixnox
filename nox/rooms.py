@@ -36,11 +36,15 @@ class Room:
 
     def state(self):
         from . import music
-        nxt = None
-        if self.queue:
-            r = self._fresh(self.queue[0])
-            nxt = r["url"] if r and not r.get("preview") else (music.pick_url(self.queue[0]) if hasattr(music, "pick_url") else None)
-        return {"t": "state", "nxt": nxt, "auto": self.autoplay, "seq": self.seq, "track": pub(self.cur) if self.cur else None,
+        nx = []                                   # urls of the next (up to 3) songs: the Mini App keeps them ready and can move on by itself
+        for t in self.queue[:3]:
+            r = self._fresh(t)
+            u = r["url"] if r and not r.get("preview") else (music.pick_url(t) if hasattr(music, "pick_url") else None)
+            if not u:
+                break                             # keep the order: never skip a song that is not ready yet
+            nx.append(u)
+        return {"t": "state", "nxt": nx[0] if nx else None, "nx": nx, "auto": self.autoplay, "seq": self.seq,
+                "track": pub(self.cur) if self.cur else None,
                 "url": self.url if self.cur else None, "preview": self.preview,
                 "pos": round(self.position(), 2), "paused": self.paused, "st": time.time(),
                 "loop": self.loop, "queue": [pub(x) for x in self.queue[:50]], "qn": len(self.queue),
@@ -131,13 +135,13 @@ class Room:
         return r[0] if r and time.time() - r[1] < 1200 else None
 
     def _prefetch(self):
-        if self.cur is None or not self.queue:
+        if self.cur is None:
             return
-        t = self.queue[0]
-        if self._fresh(t) or t.get("_rp") or time.time() - t.get("_rf", 0) < 60:
-            return
-        t["_rp"] = True
-        self.mgr.spawn(self._pre_resolve(t))
+        for t in self.queue[:3]:                  # the next three songs, so a locked phone can keep going
+            if self._fresh(t) or t.get("_rp") or time.time() - t.get("_rf", 0) < 60:
+                continue
+            t["_rp"] = True
+            self.mgr.spawn(self._pre_resolve(t))
 
     async def _pre_resolve(self, t):
         from . import music

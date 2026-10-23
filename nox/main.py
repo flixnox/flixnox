@@ -216,7 +216,7 @@ async def ws_endpoint(ws: WebSocket):
         name = clean_text(user.get("first_name", "") or "Listener", 30)
 
         while True:
-            raw = await asyncio.wait_for(ws.receive_text(), 90)
+            raw = await asyncio.wait_for(ws.receive_text(), 240)
             is_rtc = raw.startswith('{"t":"rtc"')
             if len(raw) > (16384 if is_rtc else 4096):
                 return await ws.close(code=1009)

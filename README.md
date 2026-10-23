@@ -1,3 +1,8 @@
+## v17: background / screen-off me gaana badalte waqt glitch fix
+- Do audio players: agla gaana pehle se load rehta hai aur purana bajte-bajte hi swap hota hai (silence gap nahi, isliye Android Mini App freeze nahi karta).
+- Server ab agle 3 gaanon ke links bhejta hai, phone khud aage chalata rehta hai.
+- Background me play() refuse ho to dobara try; ws keepalive timeupdate se; ws idle timeout 240s.
+
 ## v16: audio card glitch fix: lambi divider hata di, buttons ke labels chhote (bubble ke barabar).
 
 ## v15: In Chat = ek hi message (asli music + caption + buttons). Next/auto pe usi message ka gaana badal jata hai (edit), naya message nahi aata.

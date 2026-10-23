@@ -2,8 +2,8 @@
 (function () {
   const tg = window.Telegram && window.Telegram.WebApp;
   const $ = (id) => document.getElementById(id);
-  const au = $("au"), pre = new Audio();
-  pre.preload = "none";
+  let au = $("au"), stby = new Audio();                    // two players: one plays, one holds the next song (they swap)
+  try { stby.setAttribute("playsinline", ""); document.body.appendChild(stby); } catch (e) {}
   const TABS = ["now", "search", "queue", "people"];
   const TAGS = [["Arijit Singh", "c-blue"], ["Lo-fi chill", "c-violet"], ["Punjabi hits", "c-mint"], ["Shreya Ghoshal", "c-sky"],
     ["Taylor Swift", "c-amber"], ["Diljit Dosanjh", "c-teal"], ["Old is gold", "c-violet"], ["Gym workout", "c-blue"]];
@@ -312,40 +312,134 @@
 
   // ---------- audio sync (everyone hears the same second) ----------
   // Smooth, not jumpy: small drift is fixed by a tiny speed change, a seek only happens for big drift, and never while buffering.
-  let lastSeek = 0, lastRetry = 0, lastStall = 0, bgApp = false, curUrl = "";
+  // ---------- audio: two players, so changing the song never leaves a silent gap ----------
+  // Android freezes a Mini App the moment it goes silent in the background, and the next song then only starts after you come back.
+  // So the next song is always already loaded on a second player (kept in memory when the server allows it) and takes over while the
+  // old one is still sounding. It is driven by media events, which keep firing in the background (timers do not).
+  let lastSeek = 0, lastRetry = 0, lastStall = 0, bgApp = false, curUrl = "", stbUrl = "", stbSrc = "", pendingUrl = "";
+  let chain = [], swapping = false, rp = 0, lastKeep = 0, actTok = 0, localNext = false;
   const away = () => document.hidden || bgApp;                       // screen off, or Telegram/Nekogram in the background
-  au.preload = "auto";
-  // While the app is away the phone throttles our timers and network. Chasing the room clock then (seek / speed change)
-  // is exactly what made the sound stop and stutter, so in the background the song is simply left alone to play.
-  ["waiting", "stalled"].forEach((ev) => au.addEventListener(ev, () => { lastStall = Date.now(); }));
-  // The next song is downloaded into memory early, so it starts at once and cannot stall on a weak or throttled connection.
-  const blobs = new Map(), noBlob = new Set(); let fetching = "";
+  au.preload = "auto"; stby.preload = "auto"; stby.setAttribute("playsinline", "");
+  // The coming songs are downloaded into memory early, so they start at once and cannot stall on a weak or throttled connection.
+  const blobs = new Map(), noBlob = new Set(), fetching = new Set();
   function prefetch(url) {
-    if (!url || blobs.has(url) || noBlob.has(url) || fetching === url || !window.fetch || !URL.createObjectURL) return;
-    fetching = url;
+    if (!url || blobs.has(url) || noBlob.has(url) || fetching.has(url) || !window.fetch || !URL.createObjectURL) return;
+    fetching.add(url);
     fetch(url, { mode: "cors" }).then((r) => { if (!r.ok) throw 0; return r.blob(); }).then((b) => {
       if (b.size < 20000 || b.size > 14e6) throw 0;
       blobs.set(url, URL.createObjectURL(b));
-      while (blobs.size > 3) { const k = blobs.keys().next().value; if (k === curUrl) break; try { URL.revokeObjectURL(blobs.get(k)); } catch (e) {} blobs.delete(k); }
-    }).catch(() => { noBlob.add(url); }).finally(() => { if (fetching === url) fetching = ""; });
+      for (const k of Array.from(blobs.keys())) {
+        if (blobs.size <= 4) break;
+        if (k !== curUrl && k !== stbUrl) { try { URL.revokeObjectURL(blobs.get(k)); } catch (e) {} blobs.delete(k); }
+      }
+      readyStby();
+    }).catch(() => { noBlob.add(url); }).finally(() => { fetching.delete(url); });
   }
   const srcFor = (url) => blobs.get(url) || url;
-  function seekTo(t) { try { if (au.readyState >= 1) { au.currentTime = Math.max(0, t); lastSeek = Date.now(); } } catch (e) {} }
-  function play() {
+  function nextList() {                                              // songs after the current one (after a local switch: what is left of what we knew)
+    if (!st || !st.track || st.loop) return [];
+    if (localNext) return chain;
+    return st.nx && st.nx.length ? st.nx : (st.nxt ? [st.nxt] : []);
+  }
+  function readyStby() {                                             // put the next song on the standby player
+    if (swapping || pendingUrl) return;
+    const l = nextList(), url = l[0] || "";
+    if (!url) return;
+    prefetch(url); if (l[1]) prefetch(l[1]);
+    if (noBlob.has(url)) {                                           // cannot be held in memory: let the player buffer it only near the end
+      const d = isFinite(au.duration) && au.duration > 0 ? au.duration : (st.track.dur || 0);
+      if (d - au.currentTime > 40) return;
+    }
+    const src = srcFor(url);
+    if (stbUrl === url && stbSrc === src) return;
+    stbUrl = url; stbSrc = src; stby.src = src; stby.load();
+  }
+  function seekTo(t, el) { el = el || au; try { if (el.readyState >= 1) { el.currentTime = Math.max(0, t); if (el === au) lastSeek = Date.now(); } } catch (e) {} }
+  function retryPlay(el) {                                           // in the background a refused play() must not end the music: try again
+    if (rp >= 8) return;
+    rp++;
+    setTimeout(() => {
+      if (el !== au || localOff || !st || st.paused || !el.paused) { rp = 0; return; }
+      const p = el.play(); if (p && p.catch) p.catch(() => retryPlay(el));
+    }, 600);
+  }
+  function play(el) {
+    el = el || au;
     if (localOff || !st || st.paused) return;
-    const p = au.play();
-    if (p && p.catch) p.catch(() => { if (!document.hidden) $("tap").hidden = false; });
+    const p = el.play();
+    if (p && p.catch) p.catch(() => { if (el !== au) return; if (!away()) $("tap").hidden = false; else retryPlay(el); });
   }
   $("tapbtn").onclick = () => { $("tap").hidden = true; localOff = false; seekTo(want()); play(); renderNow(); unlockRemote(); };
-  function loadTrack() {
-    badSent = -1; au.playbackRate = 1;
-    au.onloadedmetadata = () => { send({ t: "meta", seq: st.seq, dur: au.duration }); seekTo(want()); play(); };
-    curUrl = st.url; au.src = srcFor(st.url); au.load();
+
+  // make `nu` the active player. The old one keeps sounding until the new one really plays, then it stops.
+  function takeOver(nu, url, startAt, silent) {
+    const old = au;
+    const commit = (force) => {
+      if (nu === au) { swapping = false; return; }
+      au = nu; stby = old; curUrl = url; stbUrl = ""; stbSrc = ""; pendingUrl = ""; swapping = false;
+      nu.playbackRate = 1; badSent = -1;
+      try { old.pause(); } catch (e) {}
+      if (st && st.url === url && isFinite(nu.duration)) send({ t: "meta", seq: st.seq, dur: nu.duration });
+      setTimeout(readyStby, 300);
+      if (force) { if (!away()) $("tap").hidden = false; else retryPlay(nu); }
+    };
+    setTimeout(() => { swapping = false; }, 4000);                   // safety: never stay "switching" forever
+    if (startAt > 1.5) seekTo(startAt, nu);
+    if (silent) { commit(false); return; }
+    const p = nu.play();
+    if (p && p.then) p.then(() => commit(false), () => {
+      swapping = false;
+      if (!old.src || old.paused || old.ended) commit(true);        // nothing is sounding anyway: switch and ask the person to tap
+    }); else commit(false);
+  }
+  function advanceLocal() {                                          // the song is over (or nearly): start the next one right now, without waiting for the server
+    const l = nextList();
+    if (!l.length || swapping || localOff || !st || st.paused) return false;
+    const url = l[0];
+    send({ t: "ended", seq: st.seq });
+    if (stbUrl !== url) { stbUrl = url; stbSrc = srcFor(url); stby.src = stbSrc; stby.load(); }
+    swapping = true; localNext = true; chain = l.slice(1);
+    try { stby.currentTime = 0; } catch (e) {}
+    takeOver(stby, url, 0, false);
+    return true;
+  }
+  function checkSwap() {                                             // called by timeupdate: switch in the last half second if the next song is ready
+    if (swapping || localOff || !st || st.paused || st.loop) return;
+    const d = au.duration;
+    if (!isFinite(d) || d < 5) return;
+    const left = d - au.currentTime;
+    if (left > 0.45 || left < 0) return;
+    const l = nextList();
+    if (l.length && stbUrl === l[0] && stby.readyState >= 3) advanceLocal();
+  }
+  function loadTrack() {                                             // a different song than the one that is playing
+    const url = st.url;
+    badSent = -1; chain = [];
+    if (pendingUrl === url) return;
+    const tok = ++actTok;
+    if (stbUrl === url && stby.readyState >= 2) { swapping = true; return takeOver(stby, url, want(), st.paused || localOff); }
+    const nu = stby;
+    pendingUrl = url; stbUrl = url; stbSrc = srcFor(url); nu.src = stbSrc; nu.load();
+    const ready = () => {
+      nu.removeEventListener("canplay", ready);
+      if (tok !== actTok) return;
+      swapping = true;
+      takeOver(nu, url, st && st.url === url ? want() : 0, !st || st.paused || localOff);
+    };
+    nu.addEventListener("canplay", ready);
+    setTimeout(() => {                                               // never let a skipped song play on forever, and try the new one again
+      if (tok === actTok && pendingUrl === url && curUrl !== url) {
+        try { au.pause(); } catch (e) {}
+        pendingUrl = "";
+        if (st && st.url === url) loadTrack();
+      }
+    }, 7000);
   }
   function syncAudio() {
     if (!st || !st.track || !au.src) return;
     if (st.paused || localOff) { if (!au.paused) au.pause(); au.playbackRate = 1; return; }
-    if (au.paused && au.readyState >= 2 && $("tap").hidden) play();
+    if (au.paused && au.readyState >= 2 && $("tap").hidden && !swapping) play();
+    if (localNext || swapping) return;                               // we already moved on locally: the server catches up in a moment
     if (away() || Date.now() - lastStall < 20000) { if (au.playbackRate !== 1) au.playbackRate = 1; return; }
     if (au.readyState < 3 || au.seeking) return;                     // still buffering: never fight it
     const d = want() - au.currentTime, a = Math.abs(d);
@@ -355,7 +449,7 @@
   }
   function recover() {                                              // after the app was in the background the old connection is often dead
     if (!st || !st.track || !st.url || localOff || st.paused) return;
-    if (!au.src || au.error || au.ended || (au.readyState < 2 && au.networkState !== 2)) loadTrack(); else syncAudio();
+    if (!au.src || au.error || au.ended || (au.readyState < 2 && au.networkState !== 2)) { if (curUrl === st.url || !pendingUrl) { pendingUrl = ""; loadTrack(); } } else syncAudio();
   }
   let stuckSince = 0, lastRecover = 0;
   function watchStuck() {
@@ -365,38 +459,48 @@
     if (!stuckSince) stuckSince = Date.now();
     else if (Date.now() - stuckSince > (au.paused ? 3500 : 10000) && Date.now() - lastRecover > 8000) { lastRecover = Date.now(); stuckSince = 0; recover(); }
   }
-  function warmNext() {                                              // preload the next song only near the end, so it never competes with the current one
-    if (!st || !st.track || !st.nxt || st.nxt === nxtUrl) return;
-    prefetch(st.nxt);                                                // into memory if the server allows it
-    if (!noBlob.has(st.nxt)) return;                                 // blocked: fall back to warming the browser cache near the end
-    const left = (isFinite(au.duration) && au.duration > 0 ? au.duration : (st.track.dur || 0)) - want();
-    if (left > 0 && left < 30) { nxtUrl = st.nxt; pre.preload = "auto"; pre.src = st.nxt; }
+  function warmNext() { readyStby(); }
+  function onEnded() {
+    if (!st || swapping) return;
+    if (st.loop && !localOff) { send({ t: "ended", seq: st.seq }); try { au.currentTime = 0; } catch (e) {} play(); return; }
+    if (curUrl !== st.url && !localNext) return;                     // a different song is being brought in already
+    if (!advanceLocal()) send({ t: "ended", seq: st.seq });
   }
-  let localNext = false;
-  au.onended = () => {
-    if (!st) return;
-    send({ t: "ended", seq: st.seq });
-    if (st.nxt && !st.loop && !localOff && !localNext) {              // don't wait for the server (screen off / slow link): start the next song right now
-      localNext = true; badSent = -1; au.playbackRate = 1;
-      curUrl = st.nxt; au.src = srcFor(st.nxt); au.load(); const p = au.play(); if (p && p.catch) p.catch(() => {});
-    }
-  };
-  au.onerror = () => { if (st && st.track && badSent !== st.seq) { badSent = st.seq; send({ t: "bad", seq: st.seq }); } };
-  au.addEventListener("pause", () => {                               // screen off / app in background: try to keep the music going
-    if (!st || !st.track || st.paused || localOff || au.ended || !document.hidden || Date.now() - lastRetry < 6000) return;
-    lastRetry = Date.now();
-    setTimeout(() => { if (au.paused && !localOff && st && !st.paused) { const p = au.play(); if (p && p.catch) p.catch(() => {}); } }, 300);
-  });
+  function bindAudio(el) {
+    ["waiting", "stalled"].forEach((ev) => el.addEventListener(ev, () => { if (el === au) lastStall = Date.now(); }));
+    el.addEventListener("playing", () => { if (el === au) rp = 0; });
+    el.addEventListener("canplay", () => { if (el === au && el.paused && !el.ended && !swapping && !localOff && st && !st.paused && st.url === curUrl) play(el); });
+    el.addEventListener("timeupdate", () => {
+      if (el !== au) return;
+      checkSwap();
+      if (Date.now() - lastKeep > 15000) { lastKeep = Date.now(); send({ t: "ping", c: Date.now() }); }   // keeps the connection alive while the screen is off
+    });
+    el.onended = () => { if (el === au) onEnded(); };
+    el.onerror = () => {
+      if (el === au) { if (st && st.track && badSent !== st.seq) { badSent = st.seq; send({ t: "bad", seq: st.seq }); } }
+      else if (el.src) { stbUrl = ""; stbSrc = ""; }
+    };
+    el.addEventListener("pause", () => {                             // screen off / app in background: try to keep the music going
+      if (el !== au || swapping || !st || !st.track || st.paused || localOff || el.ended || !document.hidden || Date.now() - lastRetry < 6000) return;
+      lastRetry = Date.now();
+      setTimeout(() => { if (el === au && el.paused && !localOff && st && !st.paused) { const p = el.play(); if (p && p.catch) p.catch(() => retryPlay(el)); } }, 300);
+    });
+  }
+  bindAudio(au); bindAudio(stby);
 
   function onState(m) {
     const isNew = !st || st.seq !== m.seq;
     st = m;
-    if (isNew) nxtUrl = "";
     renderNow(); renderQueue(); renderMini();
-    localNext = false;
-    if (!m.track) { au.pause(); au.removeAttribute("src"); return; }
-    if (isNew && au.src && curUrl === m.url && !au.error && au.readyState >= 2) { badSent = -1; syncAudio(); }   // already playing this song (moved on by itself)
-    else if (isNew) loadTrack(); else syncAudio();
+    const behind = !isNew && localNext && m.url !== curUrl;         // the server has not caught up with our local switch yet
+    if (!behind) { chain = []; localNext = false; }
+    if (!m.track) { au.pause(); au.removeAttribute("src"); stby.pause(); curUrl = stbUrl = stbSrc = pendingUrl = ""; return; }
+    if (behind) return;
+    if (isNew && au.src && curUrl === m.url && !au.error) {         // already playing this song (moved on by itself)
+      badSent = -1; if (isFinite(au.duration)) send({ t: "meta", seq: m.seq, dur: au.duration });
+      syncAudio(); readyStby();
+    } else if (isNew) loadTrack();
+    else { syncAudio(); readyStby(); }
   }
 
   // ---------- render: now playing ----------
