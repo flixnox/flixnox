@@ -1,3 +1,6 @@
+## v11: help page
+- Help me popup wale command buttons hata diye. Ab har command ki ek-line explanation page ke text me hai (small caps), neeche sirf page buttons.
+
 ## v10: kya naya hai
 - **Buttons ke colour:** upar se row-by-row blue, green, blue, green... (Loop/Auto ON ho to label me ✔).
 - **Song bot me bhi:** player card pe **🎵 In Chat** button, song audio file ban ke isi chat me aa jata hai. **Open Player** se Mini App. Jisko jahan man kare.

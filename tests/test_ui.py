@@ -44,7 +44,7 @@ class UiTests(unittest.TestCase):
     def test_texts(self):
         self.assertIn(ui.tc("starting now"), ui.added_text(trk(1), "start", "Sam"))
         self.assertLessEqual(len(ui.WELCOME.format(name="N" * 30)), 1024)
-        self.assertIn("/invite", [c for c, _ in ui.HELP_PAGES["all"][1]])
+        self.assertIn("/invite", [c for _, c, _d in ui.HELP_PAGES["all"][2]])
         self.assertEqual(ui.tc("welcome to sonic nox"), "Wᴇʟᴄᴏᴍᴇ Tᴏ Sᴏɴɪᴄ Nᴏx")
         w = ui.welcome_kb().inline_keyboard
         self.assertEqual(w[0][0].style, "primary")

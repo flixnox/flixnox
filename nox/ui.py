@@ -107,58 +107,62 @@ HELP = (
     "👇 <i>Tap a page below. Tap any command button to see what it does.</i>"
 )
 
-# page -> (title, [(command, short description)])
+# page -> (title, intro, [(icon, command, what it does)])
 HELP_PAGES = {
-    "all": ("🎵 everyone", [
-        ("/play", "Add a song to the queue.\nExample: /play kesariya"),
-        ("/queue", "Show what is playing and what comes next."),
-        ("/invite", "Call friends into the room. Reply to someone with /invite to ping them."),
-        ("/join", "Get the button that opens the live room."),
-        ("/help", "Open this help page."),
+    "all": ("🎵 everyone", "commands for every member", [
+        ("🎵", "/play", "add a song to the queue"),
+        ("📜", "/queue", "see what plays now and next"),
+        ("📨", "/invite", "call friends into the room"),
+        ("🎧", "/join", "get the button to enter the live room"),
+        ("📖", "/help", "open this guide"),
     ]),
-    "adm": ("🛡 admins", [
-        ("/skip", "Skip to the next song."),
-        ("/pause", "Pause the music for everyone."),
-        ("/resume", "Resume the music."),
-        ("/loop", "Repeat the current song."),
-        ("/shuffle", "Shuffle the queue."),
-        ("/autoplay", "Keep playing similar songs when the queue ends."),
-        ("/clear", "Empty the queue."),
-        ("/end", "Close the room."),
-        ("/settings", "Who can add songs, auto-delete and more."),
+    "adm": ("🛡 admins", "only group admins can use these", [
+        ("⏭", "/skip", "jump to the next song"),
+        ("⏸", "/pause", "pause the music for everyone"),
+        ("▶️", "/resume", "continue the music"),
+        ("🔁", "/loop", "repeat the current song"),
+        ("🔀", "/shuffle", "mix up the queue"),
+        ("♾", "/autoplay", "keep similar songs coming when the queue ends"),
+        ("🧹", "/clear", "empty the queue"),
+        ("⏹", "/end", "close the room"),
+        ("⚙", "/settings", "who can add songs, auto delete and more"),
     ]),
-    "me": ("🎧 private player", [
-        ("song name", "Send any song or artist name here. Pick a result to start your own player."),
-        ("/play", "Same as sending a name: /play kesariya"),
-        ("Open Player", "Listen alone in the Mini App."),
-        ("In Chat", "Get the song as an audio file right here in the chat."),
-        ("Stop", "Close your private player."),
+    "me": ("🎧 private player", "listen alone, right here in my chat", [
+        ("✍️", "song name", "send any song or artist name"),
+        ("📲", "open player", "listen in the mini app"),
+        ("🎵", "in chat", "get the song as audio in this chat"),
+        ("🎛", "pause · skip · loop · auto", "control it from the player card"),
+        ("📜", "queue", "see the songs lined up"),
+        ("⏹", "stop", "close your player"),
     ]),
 }
+
+
+def _sent(text):
+    """'pause the music' -> 'Pᴀᴜsᴇ ᴛʜᴇ ᴍᴜsɪᴄ' (only the first letter is big)."""
+    w = str(text).split(" ", 1)
+    return tc(w[0]) + (" " + sc(w[1]) if len(w) > 1 else "")
 
 
 def help_text(page="home"):
     if page == "home" or page not in HELP_PAGES:
         return HELP
-    title, cmds = HELP_PAGES[page]
-    return "\n".join([head(title.split(" ", 1)[0] + " <b>" + tc(title.split(" ", 1)[1]) + "</b>"), DIV,
-                      "👇 <i>Tap a command to see what it does.</i>"])
+    title, intro, cmds = HELP_PAGES[page]
+    icon, name = title.split(" ", 1)
+    body = []
+    for ic, cmd, desc in cmds:
+        c = cmd if cmd.startswith("/") else "<b>" + tc(cmd) + "</b>"
+        body.append(f"{ic} {c}\n    ╰ <i>{_sent(desc)}</i>")
+    return "\n".join([head(icon + " <b>" + tc(name) + "</b>"), DIV, "✨ <i>" + _sent(intro) + "</i>", DIV] + ["\n".join(body[i:i + 1]) for i in range(len(body))]
+                      + [DIV, "💡 " + _sent("tap a page below to switch")])
 
 
 def help_kb(page="home"):
-    """Home: three page buttons. A page: its commands as buttons (2 per row, blue/green rows) + back."""
-    if page == "home" or page not in HELP_PAGES:
-        return kb([btn("🎵 Everyone", cb="hp:all", style=P, fill="half"), btn("🛡 Admins", cb="hp:adm", style=P, fill="half")],
-                  [btn("🎧 Private Player", cb="hp:me", style=S, fill="full")],
-                  [btn("🏠 Back", cb="hb", style=S, fill="full")])
-    cmds = HELP_PAGES[page][1]
-    rows = []
-    for i in range(0, len(cmds), 2):
-        st = P if (i // 2) % 2 == 0 else S
-        rows.append([InlineKeyboardButton(text=(c if c.startswith("/") else tc(c)), callback_data=f"hc:{page}:{j}", style=st)
-                     for j, (c, _d) in list(enumerate(cmds))[i:i + 2]])
-    rows.append([btn("⬅ Help", cb="hp:home", style=P, fill="half"), btn("🏠 Back", cb="hb", style=S, fill="half")])
-    return kb(*rows)
+    """Navigation only: pages (blue / green / blue rows). The page you are on is marked."""
+    mark = lambda k, label: label + (" ✔" if page == k else "")
+    return kb([btn(mark("all", "🎵 Everyone"), cb="hp:all", style=P, fill="half"), btn(mark("adm", "🛡 Admins"), cb="hp:adm", style=P, fill="half")],
+              [btn(mark("me", "🎧 Private Player"), cb="hp:me", style=S, fill="full")],
+              [btn("🏠 Back", cb="hb", style=P, fill="full")])
 
 
 THANKS = (head("🎉 <b>" + tc("thanks for adding me") + "</b>") + "\n" + DIV + "\n"

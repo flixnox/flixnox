@@ -235,19 +235,6 @@ async def cb_help_page(cb: CallbackQuery):
     await _edit_card(cb, ui.help_text(page), ui.help_kb(page))
 
 
-@router.callback_query(F.data.startswith("hc:"))
-async def cb_help_cmd(cb: CallbackQuery):
-    """A command button on a help page: show what it does in a small popup."""
-    if not await guard_cb(cb):
-        return
-    try:
-        _, page, j = cb.data.split(":")
-        cmd, desc = ui.HELP_PAGES[page][1][int(j)]
-    except (ValueError, KeyError, IndexError):
-        return await cb.answer()
-    await cb.answer(f"{cmd}\n\n{desc}"[:200], show_alert=True)
-
-
 @router.callback_query(F.data == "hb")
 async def cb_help_back(cb: CallbackQuery):
     if not await guard_cb(cb):
