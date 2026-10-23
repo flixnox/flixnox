@@ -1,3 +1,5 @@
+## v16: audio card glitch fix: lambi divider hata di, buttons ke labels chhote (bubble ke barabar).
+
 ## v15: In Chat = ek hi message (asli music + caption + buttons). Next/auto pe usi message ka gaana badal jata hai (edit), naya message nahi aata.
 
 ## v14: In Chat ab 2 message: upar player card (banner/cover SPOILER me + buttons), neeche asli music message. Next pe naya gaana neeche aata hai, card wahi update hota hai. Private player card ka cover bhi spoiler me.

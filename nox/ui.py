@@ -27,7 +27,6 @@ def tc(text):
 
 
 DIV = "★▬▬▬▬▬▬▬▬▬▬▬▬★"
-DIVW = "★" + "▬" * 16 + "★"          # wider line for the audio card: makes its bubble as wide as the buttons
 
 
 def head(icon_title, status=""):
@@ -309,7 +308,7 @@ def solo_caption(room, audio=False):
         return "\n".join([head("🎧 <b>" + tc("your player") + "</b>", "⚪ <b>" + tc("idle") + "</b>"), DIV,
                            "🔎 <b>" + tc("send a song name to search") + "</b>", DIV, "💡 " + _code("shape of you")])
     t = room.cur
-    DV = DIVW if audio else DIV
+    DV = DIV
     if audio:
         status = "💿 <b>" + tc("in chat") + "</b>"
     else:
@@ -336,11 +335,12 @@ def solo_kb(uid, room=None, audio=False):
     paused = bool(room and room.paused)
     loop_on = bool(room and room.loop)
     auto_on = bool(room and room.autoplay)
-    if audio:                                     # the song itself is in this message, so no pause button
+    if audio:                                     # the song itself is in this message, so no pause button.
+        # Plain small-caps labels (not letter-spread): the audio bubble is narrow, wide labels would make the buttons stick out.
         return kb(
-            [btn("📲 Open Player", url=join_url(uid), style=P, fill="half"), btn("📜 Queue", cb="q", style=P, fill="half")],
-            [btn("⏭ Next", cb="sk", style=S, fill="half"), btn(_on("🔁 Loop", loop_on), cb="lp", style=S, fill="half")],
-            [btn(_on("♾ Auto", auto_on), cb="ap", style=P, fill="half"), btn("⏹ Stop", cb="sx", style=P, fill="half")],
+            [btn("📲 Open Player", url=join_url(uid), style=P), btn("📜 Queue", cb="q", style=P)],
+            [btn("⏭ Next", cb="sk", style=S), btn(_on("🔁 Loop", loop_on), cb="lp", style=S)],
+            [btn(_on("♾ Auto", auto_on), cb="ap", style=P), btn("⏹ Stop", cb="sx", style=P)],
         )
     return kb(
         [btn("📲 Open Player", url=join_url(uid), style=P, fill="half"), btn("🎵 In Chat", cb="sa", style=P, fill="half")],
