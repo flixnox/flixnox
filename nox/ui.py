@@ -299,29 +299,47 @@ def ended_text():
 
 
 # ---------------- your private player (search in the bot, listen alone in the Mini App) ----------------
-def solo_caption(room):
+_NUM = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"]
+
+
+def solo_caption(room, audio=False):
+    """The private player card (also the caption of the audio message in chat mode)."""
     if room is None or room.cur is None:
         return "\n".join([head("🎧 <b>" + tc("your player") + "</b>", "⚪ <b>" + tc("idle") + "</b>"), DIV,
                            "🔎 <b>" + tc("send a song name to search") + "</b>", DIV, "💡 " + _code("shape of you")])
     t = room.cur
-    status = ("⏸ <b>" + tc("paused") + "</b>") if room.paused else ("🟢 <b>" + tc("playing") + "</b>")
-    lines = [head("🎧 <b>" + tc("your player") + "</b>", status), DIV] + _track_lines(t, False)
+    if audio:
+        status = "💿 <b>" + tc("in chat") + "</b>"
+    else:
+        status = ("⏸ <b>" + tc("paused") + "</b>") if room.paused else ("🟢 <b>" + tc("playing") + "</b>")
+    lines = [head("🎧 <b>" + tc("your player") + "</b>", status), DIV,
+             f"🎵 <b>{esc(tc(cut(t.get('title'), 60)))}</b>",
+             f"🎤 {esc(tc(cut(t.get('artist'), 44)))}"]
+    if t.get("album"):
+        lines.append(f"💿 <i>{esc(tc(cut(t.get('album'), 40)))}</i>")
+    lines.append(f"⏱ <b>{mmss(t.get('dur'))}</b>")
     if room.queue:
-        q = ["<b>" + tc("up next") + "</b>"] + [f"{i}. {esc(cut(x['title'], 38))} — {esc(cut(x['artist'], 20))}" for i, x in enumerate(room.queue[:3], 1)]
+        q = ["⏭ <b>" + tc("up next") + "</b>"] + [f"{i}. {esc(tc(cut(x['title'], 30)))} — {esc(sc(cut(x['artist'], 16)))}" for i, x in enumerate(room.queue[:3], 1)]
         if len(room.queue) > 3:
-            q.append(f"+{len(room.queue) - 3} more")
+            q.append(f"+{len(room.queue) - 3} " + sc("more"))
         lines += [DIV, "<blockquote>" + "\n".join(q) + "</blockquote>"]
     flags = (["🔁 " + tc("loop")] if room.loop else []) + (["♾ " + tc("auto")] if room.autoplay else [])
-    lines += [DIV, ("  •  ".join(flags) + "\n" if flags else "") + "🔎 <i>Send a song name to add more</i>"]
+    lines += [DIV, ("  •  ".join(flags) + "\n" if flags else "") + "🔎 <i>" + _sent("send a song name to add more") + "</i>"]
     text = "\n".join(lines)
     return text if len(text) <= 1000 else text[:990] + "…"
 
 
-def solo_kb(uid, room=None):
+def solo_kb(uid, room=None, audio=False):
     """Blue / green / blue / green rows. Listen in the Mini App (Open Player) or right here in the chat (In Chat)."""
     paused = bool(room and room.paused)
     loop_on = bool(room and room.loop)
     auto_on = bool(room and room.autoplay)
+    if audio:                                     # the song itself is in this message, so no pause button
+        return kb(
+            [btn("📲 Open Player", url=join_url(uid), style=P, fill="half"), btn("📜 Queue", cb="q", style=P, fill="half")],
+            [btn("⏭ Next", cb="sk", style=S, fill="half"), btn(_on("🔁 Loop", loop_on), cb="lp", style=S, fill="half")],
+            [btn(_on("♾ Auto", auto_on), cb="ap", style=P, fill="half"), btn("⏹ Stop", cb="sx", style=P, fill="half")],
+        )
     return kb(
         [btn("📲 Open Player", url=join_url(uid), style=P, fill="half"), btn("🎵 In Chat", cb="sa", style=P, fill="half")],
         [btn("▶ Resume" if paused else "⏸ Pause", cb="pp", style=S, fill="half"), btn("⏭ Skip", cb="sk", style=S, fill="half")],
@@ -330,16 +348,22 @@ def solo_kb(uid, room=None):
     )
 
 
-def results_text(q):
-    return "\n".join([head("🔎 <b>" + tc("search results") + "</b>"), DIV, f"🎵 <b>{esc(cut(q, 60))}</b>",
-                      "<i>Tap a song. Then listen in the Mini App or right here in the chat.</i>"])
+def results_text(q, items=()):
+    rows = []
+    for i, it in enumerate(items[:8]):
+        rows.append(f"{_NUM[i]} <b>{esc(tc(cut(it['title'], 40)))}</b>  ⏱ {mmss(it.get('dur'))}\n      ╰ 🎤 {esc(sc(cut(it['artist'], 30)))}")
+    return "\n".join([head("🔎 <b>" + tc("search results") + "</b>"), DIV, f"🎶 <b>{esc(tc(cut(q, 50)))}</b>", DIV,
+                      "<blockquote>" + "\n".join(rows) + "</blockquote>", DIV,
+                      "👇 <i>" + _sent("tap a number to play it") + "</i>"])
 
 
 def results_kb(items, uid):
+    """Numbered buttons, 4 per row, rows alternate blue / green."""
     rows = []
-    for i, it in enumerate(items[:8]):
-        label = f"🎵 {cut(it['title'], 30)} · {cut(it['artist'], 16)}"
-        rows.append([btn(label, cb="ps:" + it["token"], style=P if i % 2 == 0 else S, small=False)])
+    for k in range(0, min(len(items), 8), 4):
+        st = P if (k // 4) % 2 == 0 else S
+        rows.append([InlineKeyboardButton(text=_NUM[i], callback_data="ps:" + it["token"], style=st)
+                     for i, it in list(enumerate(items[:8]))[k:k + 4]])
     rows.append([btn("📲 Open Player", url=join_url(uid), style=P if len(rows) % 2 == 0 else S, fill="full")])
     return kb(*rows)
 

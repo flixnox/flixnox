@@ -1,3 +1,7 @@
+## v12: player + search UI
+- Search results: numbered list (small caps) + 1-8 number buttons (4 per row, blue/green rows).
+- Player card: premium layout (title, artist, album, duration, up next). **In Chat** ab file nahi, asli Telegram music message bhejta hai (cover + Telegram ke apne player me chalta hai) aur wahi player panel ko replace karta hai; buttons uske neeche rehte hain. Next dabane pe naya gaana purane ko replace karta hai.
+
 ## v11: help page
 - Help me popup wale command buttons hata diye. Ab har command ki ek-line explanation page ke text me hai (small caps), neeche sirf page buttons.
 
