@@ -4,11 +4,14 @@ All API calls go through a shared semaphore, TTL caches, and a circuit breaker �
 same pattern as music.py so the bot never hangs waiting on a slow upstream."""
 import asyncio
 import html
+import logging
 import re
 import secrets
 import time
 
 import httpx
+
+log = logging.getLogger("moviebox")
 
 from . import config
 from .security import clean_text, safe_https_url
@@ -104,12 +107,14 @@ async def _api(name, path, params=None, timeout=9.0):
     try:
         async with _sem:
             r = await client().get(url, params=params, timeout=timeout)
+        log.debug("MB %s %s params=%s → %s len=%d", name, url, params, r.status_code, len(r.content))
         if r.status_code != 200 or len(r.content) > 4_000_000:
             raise ValueError(r.status_code)
         js = r.json()
         BREAKER.good(name)
         return js
-    except Exception:
+    except Exception as e:
+        log.debug("MB %s %s → error %s", name, url, e)
         BREAKER.fail(name)
         return None
 
@@ -218,12 +223,14 @@ async def search(q: str, limit: int = 8):
     if hit is not None:
         return hit
 
-    # try the most common search endpoint shapes
+    # primary path inferred from the known home URL: /movie/moviebox/home
+    # → search lives at /movie/moviebox/search (or /movie/moviebox/movies with a query)
     js = (
-        await _api("search", "/search",          {"q": q, "limit": limit})
-        or await _api("search", "/search",        {"query": q, "limit": limit})
-        or await _api("search", "/movie/search",  {"q": q})
-        or await _api("search", "/movies/search", {"q": q})
+        await _api("search", "/movie/moviebox/search",  {"q": q, "limit": limit})
+        or await _api("search", "/movie/moviebox/search", {"query": q, "limit": limit})
+        or await _api("search", "/movie/moviebox/movies", {"q": q, "limit": limit})
+        or await _api("search", "/search",               {"q": q, "limit": limit})
+        or await _api("search", "/movie/search",         {"q": q})
     )
     rows = []
     if isinstance(js, dict):
@@ -258,9 +265,10 @@ async def details(movie_id: str):
         return hit
 
     js = (
-        await _api("detail", f"/movie/{movie_id}")
+        await _api("detail", f"/movie/moviebox/{movie_id}")
+        or await _api("detail", f"/movie/moviebox/movie/{movie_id}")
+        or await _api("detail", f"/movie/{movie_id}")
         or await _api("detail", f"/movies/{movie_id}")
-        or await _api("detail", f"/movie/detail/{movie_id}")
     )
     if isinstance(js, dict):
         data = js.get("data") or js.get("movie") or js.get("result") or js
@@ -283,10 +291,11 @@ async def episodes(movie_id: str, season: str = ""):
     if hit is not None:
         return hit
 
-    path  = f"/movie/{movie_id}/episodes"
     params = {"season": season} if season else None
     js    = (
-        await _api("eps", path, params)
+        await _api("eps", f"/movie/moviebox/{movie_id}/episodes", params)
+        or await _api("eps", f"/movie/moviebox/episodes/{movie_id}", params)
+        or await _api("eps", f"/movie/{movie_id}/episodes", params)
         or await _api("eps", f"/movies/{movie_id}/episodes", params)
     )
     rows = []
