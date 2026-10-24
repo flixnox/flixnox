@@ -8,7 +8,7 @@ from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import BufferedInputFile, CallbackQuery, ChatMemberUpdated, FSInputFile, InputMediaAudio, InputMediaPhoto, Message
 
-from . import config, music, state, ui
+from . import config, moviebox, music, state, ui
 from .security import clean_text
 from .state import bot, cb_rl, cmd_rl, is_admin, penalty, rooms, store
 
@@ -343,6 +343,224 @@ async def cmd_queue(m: Message):
         r = await m.reply(ui.queue_text(rooms.get(m.chat.id, create=False)))
         ids = _qmsgs.setdefault(m.chat.id, [])
         ids[:] = (ids + [r.message_id, m.message_id])[-20:]
+
+
+# ---------------- MovieBox: /search + detail + episode + download (group) ----------------
+_mb_last_results = {}   # user_id -> list of normalised movie dicts (for "back to results")
+
+
+@router.message(Command("search"), F.chat.type.in_(GROUPS))
+async def cmd_movie_search(m: Message, command: CommandObject):
+    if not await guard(m):
+        return
+    q = clean_text(command.args or "", 80)
+    if len(q) < 2:
+        t = await m.reply("Usage: <code>/search movie name</code>")
+        _temp(t)
+        return
+    wait = await m.reply("🔎 Searching…")
+    results = await moviebox.search(q, limit=8)
+    try:
+        await wait.delete()
+    except TelegramAPIError:
+        pass
+    if not results:
+        t = await m.reply("😕 No movies found. Try a different title.")
+        _temp(t)
+        return
+    uid = m.from_user.id
+    # stash each result and attach token for secure callbacks
+    for r in results:
+        r["token"] = moviebox.stash(uid, r)
+    _mb_last_results[uid] = results
+    t = await m.reply(
+        ui.moviebox_results_text(q),
+        reply_markup=ui.moviebox_results_kb(results, uid),
+    )
+    _temp(t, secs=300)   # results live 5 minutes then auto-delete
+    await _autodel(m)
+
+
+@router.callback_query(F.data.startswith("mb:"))
+async def cb_movie_detail(cb: CallbackQuery):
+    """User tapped a search-result button → show full detail in group."""
+    if not await guard_cb(cb):
+        return
+    await cb.answer()
+    token = cb.data[3:]
+    uid   = cb.from_user.id
+    hit   = moviebox.take(token, uid)
+    if not hit:
+        await cb.answer("This result has expired. Search again.", show_alert=True)
+        return
+    wait = await cb.message.answer("⏳ Loading…")
+    movie = await moviebox.details(hit["id"])
+    if not movie:
+        movie = hit               # fallback: use the search-result data we already have
+    eps = []
+    mtype = (movie.get("type") or "").lower()
+    if any(k in mtype for k in ("series", "tv", "show")):
+        eps = await moviebox.episodes(hit["id"])
+    try:
+        await wait.delete()
+    except TelegramAPIError:
+        pass
+    # stash the full detail so download/episode callbacks can retrieve it safely
+    movie["token"] = moviebox.stash(uid, movie)
+    for ep in eps:
+        ep["token"] = moviebox.stash_ep(uid, ep)
+
+    await send_banner(
+        cb.message.chat.id,
+        ui.moviebox_detail_text(movie),
+        ui.moviebox_detail_kb(movie, eps),
+        spoiler=False,
+        photo=movie.get("poster"),
+    )
+
+
+@router.callback_query(F.data.startswith("mbp:"))
+async def cb_movie_ep_page(cb: CallbackQuery):
+    """Paginate episode list: mbp:{movie_id}:{page}"""
+    if not await guard_cb(cb):
+        return
+    await cb.answer()
+    parts = cb.data[4:].rsplit(":", 1)
+    if len(parts) != 2:
+        return
+    movie_id, page_str = parts
+    try:
+        page = int(page_str)
+    except ValueError:
+        return
+    uid = cb.from_user.id
+    eps   = await moviebox.episodes(movie_id)
+    movie = await moviebox.details(movie_id)
+    if not movie:
+        return
+    movie["token"] = moviebox.stash(uid, movie)
+    for ep in eps:
+        ep["token"] = moviebox.stash_ep(uid, ep)
+    try:
+        if cb.message.photo:
+            await cb.message.edit_caption(
+                caption=ui.moviebox_detail_text(movie),
+                reply_markup=ui.moviebox_detail_kb(movie, eps, page),
+            )
+        else:
+            await cb.message.edit_reply_markup(reply_markup=ui.moviebox_detail_kb(movie, eps, page))
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data == "mbr")
+async def cb_movie_back(cb: CallbackQuery):
+    """Back to the previous results list."""
+    if not await guard_cb(cb):
+        return
+    await cb.answer()
+    uid     = cb.from_user.id
+    results = _mb_last_results.get(uid)
+    if not results:
+        try:
+            await cb.message.delete()
+        except TelegramAPIError:
+            pass
+        return
+    # re-stash so tokens are fresh
+    for r in results:
+        r["token"] = moviebox.stash(uid, r)
+    try:
+        if cb.message.photo:
+            await cb.message.delete()
+        else:
+            await cb.message.edit_text(
+                ui.moviebox_results_text(""),
+                reply_markup=ui.moviebox_results_kb(results, uid),
+            )
+    except TelegramAPIError:
+        pass
+    await cb.message.answer(
+        ui.moviebox_results_text("your recent search"),
+        reply_markup=ui.moviebox_results_kb(results, uid),
+    )
+
+
+@router.callback_query(F.data.startswith("mbd:"))
+async def cb_movie_download(cb: CallbackQuery):
+    """Download button on a plain movie → DM the user the stream link."""
+    if not await guard_cb(cb):
+        return
+    await cb.answer()
+    token = cb.data[4:]
+    uid   = cb.from_user.id
+    movie = moviebox.take(token, uid)
+    if not movie:
+        await cb.answer("Link expired. Open the detail again.", show_alert=True)
+        return
+    await _send_movie_to_pvt(cb, uid, movie)
+
+
+@router.callback_query(F.data.startswith("mbe:"))
+async def cb_episode_download(cb: CallbackQuery):
+    """Download button on an episode → DM the user."""
+    if not await guard_cb(cb):
+        return
+    await cb.answer()
+    token = cb.data[4:]
+    uid   = cb.from_user.id
+    ep    = moviebox.take_ep(token, uid)
+    if not ep:
+        await cb.answer("Link expired. Open the detail again.", show_alert=True)
+        return
+    # retrieve the parent movie title from stash via movie detail
+    movie = {"title": "Series", "type": "series"}   # fallback; detail lookup is optional
+    await _send_movie_to_pvt(cb, uid, movie, ep=ep)
+
+
+async def _send_movie_to_pvt(cb: CallbackQuery, uid: int, movie: dict, ep=None):
+    """DM the user their stream link; show a brief in-group notice."""
+    stream_url = None
+    if ep:
+        stream_url = ep.get("url") or ""
+    else:
+        streams = movie.get("streams") or []
+        if streams:
+            first = streams[0]
+            stream_url = (first.get("url") or first.get("link") or first) if isinstance(first, dict) else str(first)
+
+    caption = ui.moviebox_pvt_text(movie, ep)
+    try:
+        if stream_url:
+            await bot.send_message(
+                uid,
+                caption + f'\n\n<a href="{ui.esc(str(stream_url))}">⬇ Click here to download / stream</a>',
+                disable_web_page_preview=False,
+            )
+        else:
+            # no direct stream URL in API data — send the detail page URL instead
+            detail_url = f"{config.MOVIEBOX_BASE}/movie/{movie.get('id', '')}"
+            await bot.send_message(
+                uid,
+                caption + f'\n\n<a href="{ui.esc(detail_url)}">🎬 Open on MovieBox</a>',
+                disable_web_page_preview=False,
+            )
+        # brief notice in the group (auto-deleted)
+        name = ui.esc(cb.from_user.first_name[:24] if cb.from_user.first_name else "")
+        notice = await cb.message.answer(
+            f"📨 {name}, check your private chat — I sent the download link there!"
+        )
+        _temp(notice, secs=30)
+    except TelegramAPIError as e:
+        if "bot was blocked" in str(e).lower() or "chat not found" in str(e).lower() or "forbidden" in str(e).lower():
+            bot_link = f"https://t.me/{config.BOT_USERNAME}?start=dl"
+            notice = await cb.message.answer(
+                f"⚠️ <a href='{bot_link}'>Start me in private first</a>, then tap Download again.",
+                disable_web_page_preview=True,
+            )
+            _temp(notice, secs=60)
+        else:
+            raise
 
 
 # ---------------- invite: anyone in the room can call the rest of the group ----------------

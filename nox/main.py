@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from starlette.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from . import admin, broadcast, config, handlers, music, security, state
+from . import admin, broadcast, config, handlers, moviebox, music, security, state
 from .security import clean_text, same
 from .state import bot, conn_rl, penalty, rooms, rtc_rl, search_rl, store, ws_rl
 
@@ -58,7 +58,7 @@ async def lifespan(app):
             ("start", "Open the room (admins)"), ("play", "Add a song"), ("queue", "Show the queue"), ("invite", "Invite the group to the room"),
             ("skip", "Skip song (admins)"), ("pause", "Pause (admins)"), ("resume", "Resume (admins)"),
             ("loop", "Toggle loop (admins)"), ("autoplay", "Toggle autoplay (admins)"), ("join", "Get the join button"), ("shuffle", "Shuffle queue (admins)"), ("clear", "Clear queue (admins)"),
-            ("end", "Stop the room (admins)"), ("settings", "Group settings (admins)"), ("help", "How it works"))],
+            ("end", "Stop the room (admins)"), ("settings", "Group settings (admins)"), ("search", "Search movies / series"), ("help", "How it works"))],
             scope=BotCommandScopeAllGroupChats())
         await bot.set_my_short_description("Live listening rooms for your Telegram group.")
         await bot.set_my_description("Sonic Nox turns your group into a live listening room. Add me to a group, "
@@ -73,6 +73,7 @@ async def lifespan(app):
     for t in bg:
         t.cancel()
     await music.close()
+    await moviebox.close()
     await bot.session.close()
 
 

@@ -25,7 +25,8 @@ MONGO_URI = _env("MONGO_URI")
 MONGO_DB = _env("MONGO_DB", "noxroom")
 SUPPORT_URL = _env("SUPPORT_URL")
 # Music source: JioSaavn API. The default works out of the box, so no env variable is needed on Render.
-JIOSAAVN_BASE = _env("JIOSAAVN_BASE", "https://jiosaavn-api-ruddy-phi.vercel.app/api").rstrip("/")
+JIOSAAVN_BASE   = _env("JIOSAAVN_BASE",  "https://jiosaavn-api-ruddy-phi.vercel.app/api").rstrip("/")
+MOVIEBOX_BASE   = _env("MOVIEBOX_BASE", "https://curiousapis.name.ng/moviebox").rstrip("/")
 LYRICS_BASE = _env("LYRICS_BASE", "https://api.lyrics.ovh/v1").rstrip("/")
 AUDIO_KBPS = int(_env("AUDIO_KBPS", "160"))                      # 96 / 160 / 320 (160 starts fastest on mobile data)
 MAX_QUEUE = int(_env("MAX_QUEUE", "500"))                        # invisible safety cap, not a user limit

@@ -368,3 +368,133 @@ def results_kb(items, uid):
 
 def solo_closed():
     return "\n".join([head("⏹ <b>" + tc("player stopped") + "</b>"), DIV, "Send me a song name whenever you want to listen again."])
+
+
+# ─────────────────────── MovieBox UI ────────────────────────────────────────
+
+def _mb_type_icon(mtype):
+    t = str(mtype or "").lower()
+    if "series" in t or "show" in t or "tv" in t:
+        return "📺"
+    return "🎬"
+
+
+def moviebox_results_text(q):
+    return "\n".join([
+        head("🎬 <b>" + tc("moviebox results") + "</b>"),
+        DIV,
+        f"🔎 <b>{esc(tc(cut(q, 50)))}</b>",
+        DIV,
+        "👇 <i>" + _sent("tap a title to see full details") + "</i>",
+    ])
+
+
+def moviebox_results_kb(items, user_id):
+    """One movie per row, alternating blue (P) / green (S). Token = stash key."""
+    rows = []
+    for i, it in enumerate(items[:8]):
+        year  = f" ({it['year']})" if it.get("year") else ""
+        icon  = _mb_type_icon(it.get("type"))
+        label = f"{icon} {tc(cut(it['title'], 24))}{sc(year)}"
+        rows.append([InlineKeyboardButton(
+            text=label,
+            callback_data="mb:" + it["token"],
+            style=P if i % 2 == 0 else S,
+        )])
+    return kb(*rows)
+
+
+def moviebox_detail_text(m):
+    """Full detail caption (≤ 1024 chars for Telegram photo captions)."""
+    icon  = _mb_type_icon(m.get("type"))
+    title = esc(tc(cut(m.get("title") or "", 80)))
+    year  = esc(m.get("year") or "")
+    genre = esc(sc(cut(m.get("genre") or "", 30)))
+    lang  = esc(sc(cut(m.get("language") or "", 20)))
+    dur   = esc(sc(cut(m.get("duration") or "", 12)))
+    cast  = esc(cut(m.get("cast") or "", 80))
+    desc  = esc(cut(m.get("desc") or "", 400))
+    rating = m.get("rating") or ""
+
+    meta = []
+    if year:
+        meta.append(f"📅 {year}")
+    if genre:
+        meta.append(f"🎭 {genre}")
+    if lang:
+        meta.append(f"🗣 {lang}")
+    if dur:
+        meta.append(f"⏱ {dur}")
+    if rating:
+        meta.append(f"⭐ {rating}")
+
+    lines = [
+        head(f"{icon} <b>{title}</b>"),
+        DIV,
+        "  •  ".join(meta) if meta else "",
+    ]
+    if cast:
+        lines.append(f"👥 <i>{cast}</i>")
+    if desc:
+        lines += [DIV, f"📝 {desc}"]
+    lines.append(DIV)
+
+    text = "\n".join(l for l in lines if l)
+    return text if len(text) <= 1000 else text[:990] + "…"
+
+
+def moviebox_detail_kb(m, episodes=None, page=0):
+    """Buttons: episodes list (if series) + download + back."""
+    rows = []
+    eps = episodes or m.get("episodes") or []
+    is_series = (m.get("type") or "").lower() in ("series", "tv", "show", "tvshow") or bool(eps)
+
+    if is_series and eps:
+        # show up to 5 episodes per page with prev/next navigation
+        ep_page = eps[page * 5: page * 5 + 5]
+        for j, ep in enumerate(ep_page):
+            s  = ep.get("season") or ""
+            e  = ep.get("episode") or str(j + 1 + page * 5)
+            ep_title = cut(ep.get("title") or f"Episode {e}", 22)
+            label    = f"▶ S{s}E{e} {tc(ep_title)}" if s else f"▶ Ep {e} – {tc(ep_title)}"
+            rows.append([InlineKeyboardButton(
+                text=label,
+                callback_data="mbe:" + (ep.get("token") or ""),
+                style=P if j % 2 == 0 else S,
+            )])
+        nav = []
+        if page > 0:
+            nav.append(btn("⬅ Prev", cb=f"mbp:{m['id']}:{page - 1}", style=P))
+        if len(eps) > (page + 1) * 5:
+            nav.append(btn("Next ➡", cb=f"mbp:{m['id']}:{page + 1}", style=S))
+        if nav:
+            rows.append(nav)
+    else:
+        # plain movie — single download button
+        rows.append([btn("⬇ Download", cb="mbd:" + (m.get("token") or ""), style=S, fill="full")])
+
+    rows.append([btn("🔙 Back to results", cb="mbr", style=P, fill="full")])
+    return kb(*rows)
+
+
+def moviebox_pvt_text(m, ep=None):
+    """Caption for the download DM that lands in private chat."""
+    icon  = _mb_type_icon(m.get("type"))
+    title = esc(tc(cut(m.get("title") or "", 80)))
+    if ep:
+        s = ep.get("season") or ""
+        e = ep.get("episode") or ""
+        ep_title = esc(tc(cut(ep.get("title") or "", 60)))
+        sub = f"S{s}E{e} – {ep_title}" if s else f"Ep {e} – {ep_title}"
+        return "\n".join([
+            head(f"{icon} <b>{title}</b>"),
+            DIV,
+            f"📺 <b>{esc(sub)}</b>",
+            DIV,
+            "⬇ " + sc("your download link is below"),
+        ])
+    return "\n".join([
+        head(f"{icon} <b>{title}</b>"),
+        DIV,
+        "⬇ " + sc("your download link is below"),
+    ])
