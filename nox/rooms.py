@@ -1,10 +1,27 @@
 """Room state. The server owns the clock: clients only follow it, so nobody can drive a room by themselves."""
 import asyncio
+import time
+from urllib.parse import quote, urlparse
 import random
 import time
 from collections import deque
 
 from . import config
+
+
+YT_HOSTS = ("googlevideo.com", "youtube.com", "ytimg.com")
+URL_TTL = 3 * 3600
+
+def is_youtube_url(url: str) -> bool:
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return any(host == h or host.endswith("." + h) for h in YT_HOSTS)
+
+def proxy_url(url: str) -> str:
+    origin = str(getattr(config, "PUBLIC_ORIGIN", "") or "").rstrip("/")
+    return f"{origin}/api/ytstream?url={quote(url, safe='')}"
 
 PUB = ("title", "artist", "dur", "cover", "by", "src", "album")
 
@@ -164,6 +181,7 @@ class Room:
         """Move to the next playable track. Caller must hold the lock."""
         from . import music
         self._cancel_wd()
+        # ... rest of advance stays same, but resolve is handled by _fresh logic 
         if (not self.queue and self.autoplay and self.cur is not None and hasattr(music, "related")
                 and (self.clients or self.empty_plays < 3)):          # empty room: stop after ~3 songs
             try:
