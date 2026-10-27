@@ -341,3 +341,149 @@ async def health():
         one("JioSaavn songs", "/search/songs", {"query": "arijit", "limit": 1}),
         one("JioSaavn artists", "/search/artists", {"query": "arijit", "limit": 1}),
         one("Lyrics", "/Coldplay/Yellow", None, config.LYRICS_BASE))
+
+# ==========================================
+# YOUTUBE INTEGRATION (Fallback)
+# ==========================================
+import random
+import json
+from urllib.parse import quote
+
+INNERTUBE_CLIENTS = [
+    {"client": {"clientName": "ANDROID", "clientVersion": "19.09.37", "androidSdkVersion": 30, "hl": "en", "gl": "US"}},
+    {"client": {"clientName": "IOS", "clientVersion": "19.09.3", "deviceModel": "iPhone14,3", "hl": "en", "gl": "US"}},
+    {"client": {"clientName": "WEB", "clientVersion": "2.20240101.00.00", "hl": "en", "gl": "US"}}
+]
+INNERTUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
+
+
+import http.cookiejar
+
+def _get_cookiejar():
+    if not getattr(config, "COOKIES_FILE", None) or not os.path.exists(config.COOKIES_FILE):
+        return None
+    cj = http.cookiejar.MozillaCookieJar(config.COOKIES_FILE)
+    try:
+        cj.load(ignore_discard=True, ignore_expires=True)
+        return cj
+    except Exception:
+        return None
+
+def _get_proxy():
+    if getattr(config, "PROXIES", None):
+        return random.choice(config.PROXIES)
+    return None
+
+async def _yt_search(query, limit=5):
+    if not getattr(config, "YOUTUBE_ENABLED", True):
+        return []
+    proxy = _get_proxy()
+    body = {"context": INNERTUBE_CLIENTS[0], "query": query, "params": "EgIQAQ%3D%3D"}
+    try:
+        r = await client().post(
+            f"https://www.youtube.com/youtubei/v1/search?key={INNERTUBE_KEY}",
+            json=body, proxy=proxy, timeout=8.0,
+            cookies=_get_cookiejar()
+        )
+        data = r.json()
+    except Exception as e:
+        return []
+
+    out = []
+    def walk(node):
+        if isinstance(node, dict):
+            if "videoRenderer" in node:
+                vr = node["videoRenderer"]
+                vid = vr.get("videoId", "")
+                if vid:
+                    title = "".join(x.get("text", "") for x in vr.get("title", {}).get("runs", []))
+                    artist = vr.get("ownerText", {}).get("runs", [{}])[0].get("text", "Unknown")
+                    dur = vr.get("lengthText", {}).get("simpleText", "")
+                    dur_sec = 0
+                    if dur:
+                        try:
+                            parts = [int(x) for x in dur.split(":")]
+                            while len(parts) < 3: parts.insert(0, 0)
+                            dur_sec = parts[0]*3600 + parts[1]*60 + parts[2]
+                        except: pass
+                    
+                    thumbs = vr.get("thumbnail", {}).get("thumbnails", [])
+                    cover = thumbs[-1]["url"] if thumbs else f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+                    
+                    out.append({
+                        "id": f"yt:{vid}", "sid": vid, "src": "youtube", 
+                        "title": _text(title, 120), "artist": _text(artist, 80),
+                        "album": "YouTube", "dur": _dur(dur_sec), "cover": _https(cover),
+                        "aud": {}, "year": ""
+                    })
+            for v in node.values(): walk(v)
+        elif isinstance(node, list):
+            for v in node: walk(v)
+            
+    walk(data)
+    return out[:limit]
+
+async def _yt_resolve(sid):
+    if not getattr(config, "YOUTUBE_ENABLED", True):
+        return None
+    proxy = _get_proxy()
+    for c_ctx in INNERTUBE_CLIENTS:
+        body = {"context": c_ctx, "videoId": sid, "contentCheckOk": True, "racyCheckOk": True}
+        try:
+            r = await client().post(
+                f"https://www.youtube.com/youtubei/v1/player?key={INNERTUBE_KEY}&prettyPrint=false",
+                json=body, proxy=proxy, timeout=8.0,
+                cookies=_get_cookiejar()
+            )
+            data = r.json()
+            ps = data.get("playabilityStatus", {})
+            if ps.get("status") != "OK":
+                continue
+            
+            sd = data.get("streamingData", {})
+            formats = sd.get("adaptiveFormats", []) + sd.get("formats", [])
+            
+            best = None
+            best_score = -1
+            for f in formats:
+                mt = f.get("mimeType", "")
+                u = f.get("url")
+                if not u: continue
+                
+                score = 0
+                if "audio/mp4" in mt and "140" in str(f.get("itag")): score = 100
+                elif "audio/" in mt: score = 60
+                elif "video/mp4" in mt: score = 40
+                
+                if score > best_score:
+                    best_score = score
+                    best = u
+            
+            if best:
+                pub_url = f"{config.PUBLIC_ORIGIN}/api/ytstream?url={quote(best, safe='')}"
+                return {"url": pub_url, "preview": False, "cover": None}
+                
+        except Exception:
+            continue
+    return None
+
+_orig_search = search_all
+_orig_resolve = resolve
+
+async def search_all(q, songs=10, artists=4):
+    s, a = await _orig_search(q, songs, artists)
+    if len(s) < 2:
+        yt_s = await _yt_search(q, songs)
+        s.extend(yt_s)
+    return s, a
+
+async def search(q, limit=5):
+    s, _ = await search_all(q, limit, 0)
+    return s
+
+async def resolve(track):
+    if track.get("src") == "youtube":
+        r = await _yt_resolve(track.get("sid"))
+        if r:
+            return r
+    return await _orig_resolve(track)

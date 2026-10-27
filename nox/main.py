@@ -14,7 +14,8 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from starlette.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from . import admin, broadcast, config, handlers, moviebox, music, security, state
+from . import admin, broadcast, config, handlers, moviebox, music, security, state, stream
+from .stream import router as stream_router
 from .security import clean_text, same
 from .state import bot, conn_rl, penalty, rooms, rtc_rl, search_rl, store, ws_rl
 
@@ -78,6 +79,7 @@ async def lifespan(app):
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app.include_router(stream_router)
 app.add_middleware(GZipMiddleware, minimum_size=500)                  # smaller downloads = faster Mini App
 
 

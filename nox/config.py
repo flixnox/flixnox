@@ -72,3 +72,27 @@ def _ice():
 
 
 ICE = _ice()
+
+# --- YouTube & Proxy Settings ---
+YOUTUBE_ENABLED = _env("YOUTUBE_ENABLED", "1") == "1"
+_raw_proxies = _env("YOUTUBE_PROXIES", "")
+PROXIES = []
+if _raw_proxies:
+    if "," in _raw_proxies:
+        PROXIES = [p.strip() for p in _raw_proxies.split(",") if p.strip()]
+    else:
+        PROXIES = [p.strip() for p in _raw_proxies.split("\n") if p.strip()]
+
+
+# --- Cookies Support (B64) ---
+import base64
+import os
+COOKIES_B64 = _env("COOKIES_B64", "")
+COOKIES_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cookies.txt")
+
+if COOKIES_B64 and not os.path.exists(COOKIES_FILE):
+    try:
+        with open(COOKIES_FILE, "wb") as f:
+            f.write(base64.b64decode(COOKIES_B64))
+    except Exception:
+        pass
