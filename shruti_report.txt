@@ -1,0 +1,46 @@
+=== song id ?api=  [0] /song/Kx7B-XvmFtE?api=<KEY>
+InvalidURL("URL can't contain control characters. '/song/Kx7B-XvmFtE?api=<KEY>' (found at least ' ')")
+
+=== song id audio ?api=  [0] /song/Kx7B-XvmFtE?api=<KEY>&video=false
+InvalidURL("URL can't contain control characters. '/song/Kx7B-XvmFtE?api=<KEY>&video=false' (found at least ' ')")
+
+=== song id x-api-key  [404] /song/Kx7B-XvmFtE
+{
+ "detail": "Not found"
+}
+
+=== song id bearer  [404] /song/Kx7B-XvmFtE
+{
+ "detail": "Not found"
+}
+
+=== download url ?api=  [0] /download?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3DKx7B-XvmFtE&type=audio&api=<KEY>
+InvalidURL("URL can't contain control characters. '/download?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3DKx7B-XvmFtE&type=audio&api=<KEY>' (found at least ' ')")
+
+=== download id ?api_key=  [0] /download?id=Kx7B-XvmFtE&api_key=<KEY>
+InvalidURL("URL can't contain control characters. '/download?id=Kx7B-XvmFtE&api_key=<KEY>' (found at least ' ')")
+
+=== audio ?url=  [0] /audio?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3DKx7B-XvmFtE&api=<KEY>
+InvalidURL("URL can't contain control characters. '/audio?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3DKx7B-XvmFtE&api=<KEY>' (found at least ' ')")
+
+=== search ?q=  [0] /search?q=Believer%20Imagine%20Dragons&api=<KEY>
+InvalidURL("URL can't contain control characters. '/search?q=Believer%20Imagine%20Dragons&api=<KEY>' (found at least ' ')")
+
+=== search x-api-key  [404] /search?q=Believer%20Imagine%20Dragons
+{
+ "detail": "Not found"
+}
+
+=== yt search  [0] /youtube/search?q=Believer%20Imagine%20Dragons&api=<KEY>
+InvalidURL("URL can't contain control characters. '/youtube/search?q=Believer%20Imagine%20Dragons&api=<KEY>' (found at least ' ')")
+
+=== root json  [200] /
+<!doctype html> <html lang="en"> <head>   <meta charset="utf-8">   <meta name="viewport" content="width=device-width, initial-scale=1">   <meta name="theme-color" content="#f5f7fb">   <meta name="description" content="Open the ShrutiAPI dashboard to manage your API account, keys, and plans.">   <tit
+
+=== openapi  [404] /openapi.json
+{
+ "detail": "Not found"
+}
+
+=== docs  [200] /docs
+<!doctype html> <html lang="en"> <head> <meta charset="utf-8"> <meta name="viewport" content="width=device-width, initial-scale=1"> <title>Documentation — ShrutiBots API</title> <meta name="description" content="Overview of the ShrutiBots API: base URL, response types, and how the endpoints fit toge
