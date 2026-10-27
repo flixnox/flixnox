@@ -1,586 +1,679 @@
-"""Music source: JioSaavn API (songs, artists, direct audio links) + lyrics.
-Everything runs server-side with short timeouts, caching and a circuit breaker, so the room never waits on a slow API."""
+"""nox/music.py - unified music source resolver.
+
+Sources (order configurable via SOURCE_ORDER):
+    1. JioSaavn API   (base)
+    2. Shruti API     (secondary, nox/shruti.py)
+    3. YouTube        (fallback, InnerTube)
+
+Public API:
+    search_all(q, songs=10, artists=4) -> (songs, artists)
+    search(q, limit=5)                 -> songs
+    resolve(track)                     -> direct audio URL or None
+    stash(track) / take(key)           -> short-lived track storage
+    song / artist / pick_url           -> JioSaavn helpers
+"""
+
 import asyncio
 import html
+import logging
+import os
 import re
-import secrets
 import time
-from urllib.parse import quote
 
 import httpx
 
-from . import config
-from .security import clean_text, safe_https_url
+from . import shruti
 
+try:  # config is optional
+    from . import config
+except Exception:  # pragma: no cover
+    config = None
+
+log = logging.getLogger(__name__)
+
+# --------------------------------------------------------------------------
+# Settings
+# --------------------------------------------------------------------------
+
+JS_BASE = (getattr(config, "JIOSAAVN_API", None) or "https://saavn.dev/api").rstrip("/")
+YT_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
+YT_BASE = "https://www.youtube.com/youtubei/v1"
+QUALITY_PREF = ("320kbps", "160kbps", "96kbps", "48kbps", "12kbps")
+
+# Flip this tuple if you want Shruti to be tried before JioSaavn.
+SOURCE_ORDER = ("jiosaavn", "shruti", "youtube")
+
+_HTTP_TIMEOUT = httpx.Timeout(15.0, connect=8.0)
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+
+# --------------------------------------------------------------------------
+# TTL cache + circuit breaker
+# --------------------------------------------------------------------------
 
 class TTL:
-    def __init__(self, ttl, cap):
-        self.ttl, self.cap, self.d = ttl, cap, {}
+    """Tiny in-memory TTL cache."""
 
-    def get(self, k):
-        v = self.d.get(k)
-        if v and v[0] > time.monotonic():
-            return v[1]
-        self.d.pop(k, None)
-        return None
+    def __init__(self, ttl=300, maxsize=512):
+        self.ttl = ttl
+        self.maxsize = maxsize
+        self._d = {}
 
-    def put(self, k, v):
-        if len(self.d) >= self.cap:
+    def get(self, key):
+        item = self._d.get(key)
+        if item is None:
+            return None
+        exp, val = item
+        if exp < time.monotonic():
+            self._d.pop(key, None)
+            return None
+        return val
+
+    def set(self, key, val, ttl=None):
+        if len(self._d) >= self.maxsize:
             now = time.monotonic()
-            self.d = {a: b for a, b in self.d.items() if b[0] > now}
-            if len(self.d) >= self.cap:
-                self.d.clear()
-        self.d[k] = (time.monotonic() + self.ttl, v)
+            for k in [k for k, (e, _) in self._d.items() if e < now]:
+                self._d.pop(k, None)
+            while len(self._d) >= self.maxsize:
+                self._d.pop(next(iter(self._d)), None)
+        self._d[key] = (time.monotonic() + (ttl or self.ttl), val)
+        return val
 
-    def clear(self):
-        self.d.clear()
+    def pop(self, key, default=None):
+        item = self._d.pop(key, None)
+        if item is None:
+            return default
+        exp, val = item
+        return val if exp >= time.monotonic() else default
 
 
 class Breaker:
-    """4 failures within 30 s -> that endpoint is skipped for 30 s."""
+    """Circuit breaker: opens after `limit` consecutive failures for `cool` seconds."""
 
-    def __init__(self):
-        self.fails, self.open_until = {}, {}
+    def __init__(self, limit=5, cool=60):
+        self.limit = limit
+        self.cool = cool
+        self.fails = 0
+        self.until = 0.0
 
-    def ok(self, name):
-        return time.monotonic() >= self.open_until.get(name, 0)
+    def allow(self):
+        if self.fails >= self.limit:
+            if time.monotonic() >= self.until:
+                self.fails = self.limit - 1  # half-open: allow one probe
+                return True
+            return False
+        return True
 
-    def fail(self, name):
-        now = time.monotonic()
-        f = [t for t in self.fails.get(name, []) if now - t < 30] + [now]
-        self.fails[name] = f
-        if len(f) >= 4:
-            self.open_until[name] = now + 30
-            self.fails[name] = []
+    def ok(self):
+        self.fails = 0
+        self.until = 0.0
 
-    def good(self, name):
-        self.fails.pop(name, None)
+    def fail(self):
+        self.fails += 1
+        if self.fails >= self.limit:
+            self.until = time.monotonic() + self.cool
 
 
-BREAKER = Breaker()
-_SEARCH = TTL(600, 800)
-_RESULTS = TTL(900, 6000)
-_SONG = TTL(1800, 800)
-_LYR = TTL(3600, 400)
-_sem = asyncio.Semaphore(16)
+_cache = TTL(ttl=300, maxsize=512)
+_stash = TTL(ttl=3600, maxsize=2048)
+_js_breaker = Breaker(limit=5, cool=60)
+_yt_breaker = Breaker(limit=5, cool=60)
+
 _client = None
 
 
-def client():
+def _http():
     global _client
-    if _client is None:
+    if _client is None or _client.is_closed:
         _client = httpx.AsyncClient(
-            timeout=httpx.Timeout(7.0, connect=3.5), follow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 SonicNox/2.0", "Accept": "application/json"},
-            limits=httpx.Limits(max_connections=40, max_keepalive_connections=20, keepalive_expiry=60))
+            timeout=_HTTP_TIMEOUT,
+            follow_redirects=True,
+            headers={"User-Agent": _UA},
+        )
     return _client
 
 
-async def close():
-    if _client is not None:
-        await _client.aclose()
+# --------------------------------------------------------------------------
+# JioSaavn base helpers
+# --------------------------------------------------------------------------
 
-
-def clear_caches():
-    for c in (_SEARCH, _RESULTS, _SONG, _LYR):
-        c.clear()
-
-
-async def _api(name, path, params=None, base=None, timeout=7.0):
-    if not BREAKER.ok(name):
+async def _api(path, params=None):
+    """GET JioSaavn API, returns parsed JSON dict or None."""
+    if not _js_breaker.allow():
         return None
+    key = ("js", path, tuple(sorted((params or {}).items())))
+    hit = _cache.get(key)
+    if hit is not None:
+        return hit
     try:
-        async with _sem:
-            r = await client().get((base or config.JIOSAAVN_BASE) + path, params=params, timeout=timeout)
-        if r.status_code != 200 or len(r.content) > 3_000_000:
-            raise ValueError(r.status_code)
-        js = r.json()
-        BREAKER.good(name)
-        return js
-    except Exception:
-        BREAKER.fail(name)
+        r = await _http().get(f"{JS_BASE}/{path.lstrip('/')}", params=params)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        _js_breaker.fail()
+        log.warning("JioSaavn %s failed: %s", path, e)
         return None
+    _js_breaker.ok()
+    return _cache.set(key, data)
 
 
-# ---------- turning JioSaavn JSON into small, safe dicts (tolerant of small format differences) ----------
-def _text(v, n=120):
-    return clean_text(html.unescape(v), n) if isinstance(v, str) else ""
+def _text(s):
+    if not s:
+        return ""
+    s = html.unescape(str(s))
+    s = re.sub(r"<[^>]+>", "", s)
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def _https(u):
-    if isinstance(u, str) and u.startswith("http://"):
-        u = "https://" + u[7:]
-    return safe_https_url(u)
+    if not u:
+        return ""
+    u = str(u).strip()
+    return "https://" + u[7:] if u.startswith("http://") else u
 
 
-def _img(v):
-    """image may be [{quality,url}, ...], a url string or a dict. Prefer the biggest picture."""
-    urls = []
-    if isinstance(v, str):
-        urls = [v]
-    elif isinstance(v, dict):
-        urls = [v.get("url")]
-    elif isinstance(v, list):
-        urls = [(x.get("url") if isinstance(x, dict) else x) for x in v]
-    urls = [u for u in urls if isinstance(u, str) and u]
-    if not urls:
-        return None
-    u = urls[-1]
-    u = re.sub(r"-(50x50|150x150)\.", "-500x500.", u)
-    return _https(u)
+def _img(images):
+    """Pick the best image URL from a list of {quality,url} or a plain string."""
+    if not images:
+        return ""
+    if isinstance(images, str):
+        url = images
+    else:
+        try:
+            last = images[-1]
+            url = last.get("url", "") if isinstance(last, dict) else str(last)
+        except Exception:
+            url = ""
+    return _https(url.replace("150x150", "500x500"))
 
 
 def _artist_names(item):
-    a = item.get("artists")
-    names = []
-    if isinstance(a, dict):
-        names = [x.get("name") for x in (a.get("primary") or a.get("all") or []) if isinstance(x, dict)]
-    elif isinstance(a, list):
-        names = [x.get("name") if isinstance(x, dict) else x for x in a]
-    if not [n for n in names if n]:
-        names = [item.get("primaryArtists") or item.get("primary_artists") or item.get("singers") or item.get("subtitle") or ""]
-    names = [_text(n, 40) for n in names if isinstance(n, str) and n.strip()]
-    return clean_text(", ".join(names[:3]), 80) or "Unknown artist"
+    arts = item.get("artists") or {}
+    people = []
+    if isinstance(arts, dict):
+        people = arts.get("primary") or arts.get("all") or []
+    elif isinstance(arts, list):
+        people = arts
+    names = [_text(p.get("name")) for p in people if isinstance(p, dict) and p.get("name")]
+    if not names and item.get("primaryArtists"):
+        names = [_text(item["primaryArtists"])]
+    return ", ".join(dict.fromkeys(names))
 
 
 def _audio_map(item):
-    """{kbps: url}. Supports downloadUrl as a list of {quality,url} or a single url string."""
-    d = item.get("downloadUrl") or item.get("download_url") or item.get("media_url") or item.get("url_320")
+    """Return {quality: https_url} from a JioSaavn song payload."""
     out = {}
-    if isinstance(d, str):
-        u = _https(d)
-        if u:
-            out[160] = u
-    elif isinstance(d, list):
-        for x in d:
-            if not isinstance(x, dict):
-                continue
-            q = re.sub(r"\D", "", str(x.get("quality") or "")) or "0"
-            u = _https(x.get("url") or x.get("link"))
-            if u:
-                out[int(q)] = u
+    for d in item.get("downloadUrl") or []:
+        if isinstance(d, dict) and d.get("url"):
+            out[str(d.get("quality") or d.get("bitrate") or "")] = _https(d["url"])
     return out
 
 
-def _dur(v):
+def _dur(x):
     try:
-        v = float(v)
-        return int(v) if 5 <= v <= 14400 else None
-    except (TypeError, ValueError):
-        return None
+        return int(float(x))
+    except Exception:
+        return 0
 
 
 def song(item):
-    if not isinstance(item, dict):
-        return None
-    title = _text(item.get("name") or item.get("title") or item.get("song"), 120)
-    sid = item.get("id")
-    if not title or not sid:
-        return None
-    album = item.get("album")
+    """Normalise a JioSaavn song payload to the standard track dict."""
+    sid = str(item.get("id", ""))
     return {
-        "id": f"js:{sid}", "sid": str(sid)[:40], "src": "saavn", "title": title, "artist": _artist_names(item),
-        "album": _text(album.get("name") if isinstance(album, dict) else album, 80),
-        "dur": _dur(item.get("duration")), "cover": _img(item.get("image")), "aud": _audio_map(item),
-        "year": _text(str(item.get("year") or ""), 4),
+        "id": f"jiosaavn:{sid}",
+        "sid": sid,
+        "src": "jiosaavn",
+        "title": _text(item.get("name") or item.get("title")),
+        "artist": _artist_names(item),
+        "album": _text((item.get("album") or {}).get("name")) if isinstance(item.get("album"), dict) else "",
+        "dur": _dur(item.get("duration")),
+        "img": _img(item.get("image")),
+        "aud": _audio_map(item),
     }
 
 
 def artist(item):
-    if not isinstance(item, dict) or not item.get("name"):
-        return None
-    return {"name": _text(item.get("name"), 60), "cover": _img(item.get("image")), "id": str(item.get("id") or "")[:40]}
+    aid = str(item.get("id", ""))
+    return {
+        "id": f"artist:{aid}",
+        "aid": aid,
+        "name": _text(item.get("name")),
+        "img": _img(item.get("image")),
+    }
 
 
-def _results(js):
-    d = js.get("data") if isinstance(js, dict) else None
+def _results(data):
+    """Extract the results list from a JioSaavn response."""
+    if not isinstance(data, dict):
+        return []
+    d = data.get("data")
     if isinstance(d, dict):
         r = d.get("results")
-        if isinstance(r, list):
-            return [x for x in r if isinstance(x, dict)]
-        s = d.get("songs")
-        if isinstance(s, dict) and isinstance(s.get("results"), list):
-            return s["results"]
+        return r if isinstance(r, list) else []
     if isinstance(d, list):
-        return [x for x in d if isinstance(x, dict)]
+        return d
     return []
 
 
-def pick_url(track, kbps=None):
-    """Best audio URL for a track, close to the wanted bitrate (default 160 kbps)."""
-    aud = track.get("aud") or {}
+def pick_url(aud, prefer=None):
+    """Choose the best URL from an {quality: url} map."""
     if not aud:
         return None
-    want = kbps or config.AUDIO_KBPS
-    below = [q for q in aud if q <= want]
-    return aud[max(below)] if below else aud[min(aud)]
+    order = ((prefer,) if prefer else ()) + QUALITY_PREF
+    for q in order:
+        if aud.get(q):
+            return aud[q]
+    return next((u for u in aud.values() if u), None)
 
 
-# ---------- search ----------
-async def _songs(q, limit):
-    js = await _api("songs", "/search/songs", {"query": q, "limit": limit})
-    rows = _results(js)
-    if not rows:                                                  # fallback: global search endpoint
-        rows = _results(await _api("global", "/search", {"query": q}))
-    out, seen = [], set()
-    for r in rows:
-        s = song(r)
-        if s and s["sid"] not in seen:
-            seen.add(s["sid"])
-            out.append(s)
-    return out[:limit]
+async def _songs(q, n=10):
+    data = await _api("search/songs", {"query": q, "limit": n})
+    return [t for t in (song(i) for i in _results(data)[:n]) if t["sid"] and t["title"]]
 
 
-async def _artists(q, limit):
-    rows = _results(await _api("artists", "/search/artists", {"query": q, "limit": limit}))
-    return [a for a in (artist(r) for r in rows) if a][:limit]
-
-
-async def _orig_search_all(q, songs=10, artists=4):
-    """One round trip for the Mini App: songs and artists fetched in parallel."""
-    q = clean_text(q, 80)
-    if len(q) < 2:
-        return [], []
-    key = (q.lower(), songs, artists)
-    hit = _SEARCH.get(key)
-    if hit is not None:
-        return [dict(x) for x in hit[0]], hit[1]
-    s, a = await asyncio.gather(_songs(q, songs), _artists(q, artists) if artists else asyncio.sleep(0, result=[]))
-    _SEARCH.put(key, (s, a))
-    return [dict(x) for x in s], a
-
-
-async def search(q, limit=5):
-    """Used by /play in groups."""
-    return (await search_all(q, limit, 0))[0]
-
-
-def stash(user_id, items):
-    """Full results stay on the server; the browser only gets opaque tokens (nobody can inject a fake track or URL)."""
-    pub = []
-    for t in items:
-        tok = secrets.token_urlsafe(6)
-        _RESULTS.put(tok, (user_id, t))
-        pub.append({"token": tok, "title": t["title"], "artist": t["artist"], "dur": t["dur"], "cover": t["cover"]})
-    return pub
-
-
-def take(token, user_id):
-    v = _RESULTS.get(token) if isinstance(token, str) and len(token) <= 16 else None
-    if not v or v[0] != user_id:
-        return None
-    return dict(v[1])
-
-
-# ---------- playing ----------
-async def _orig_resolve(track):
-    """Audio link for a track. Search results already carry it, so this is instant in the normal case."""
-    url = pick_url(track)
-    if url:
-        return {"url": url, "preview": False, "cover": track.get("cover")}
-    sid = track.get("sid")
-    if sid:
-        cached = _SONG.get(sid)
-        if cached is None:
-            js = await _api("song", f"/songs/{quote(sid, safe='')}")
-            d = js.get("data") if isinstance(js, dict) else None
-            first = d[0] if isinstance(d, list) and d else (d if isinstance(d, dict) else None)
-            cached = song(first) if first else None
-            if cached:
-                _SONG.put(sid, cached)
-        if cached and cached["aud"]:
-            track["aud"] = cached["aud"]
-            return {"url": pick_url(track), "preview": False, "cover": track.get("cover")}
-    rows = await search(f'{track.get("title", "")} {track.get("artist", "")}', 3)       # last resort
-    for r in rows:
-        if r["aud"]:
-            track["aud"] = r["aud"]
-            return {"url": pick_url(track), "preview": False, "cover": track.get("cover")}
-    return None
-
-
-async def related(track, exclude=()):
-    """Songs similar to `track` (used by autoplay). Tries the suggestions endpoint, then the same artist."""
-    sid = track.get("sid")
-    rows = []
-    if sid:
-        js = await _api("suggest", f"/songs/{quote(sid, safe='')}/suggestions", {"limit": 10})
-        rows = _results(js)
-    out = [s for s in (song(r) for r in rows) if s]
-    if not out:
-        first = (track.get("artist") or "").split(",")[0].strip()
-        out = await search(first, 10) if first else []
-    return [s for s in out if s["id"] not in exclude and s["id"] != track.get("id") and s["aud"]][:6]
-
-
-async def lyrics(artist_name, title):
-    a = re.split(r"[,&]", artist_name or "")[0].strip()
-    t = re.sub(r"\s*[\(\[].*?[\)\]]", "", title or "").strip()
-    key = (a.lower(), t.lower())
-    hit = _LYR.get(key)
-    if hit is not None:
-        return hit
-    js = await _api("lyrics", f"/{quote(a, safe='')}/{quote(t, safe='')}", base=config.LYRICS_BASE, timeout=8.0)
-    txt = js.get("lyrics") if isinstance(js, dict) else ""
-    txt = txt.replace("\r", "").strip()[:6000] if isinstance(txt, str) else ""
-    _LYR.put(key, txt)
-    return txt
-
-
-async def health():
-    async def one(n, path, params, base=None):
-        t = time.monotonic()
-        try:
-            async with _sem:
-                r = await client().get((base or config.JIOSAAVN_BASE) + path, params=params, timeout=15.0)
-            return n, r.status_code == 200, int((time.monotonic() - t) * 1000)
-        except Exception:
-            return n, False, None
-
-    return await asyncio.gather(
-        one("JioSaavn songs", "/search/songs", {"query": "arijit", "limit": 1}),
-        one("JioSaavn artists", "/search/artists", {"query": "arijit", "limit": 1}),
-        one("Lyrics", "/Coldplay/Yellow", None, config.LYRICS_BASE))
-
-# ==========================================
-
-import itertools
-
-# Pool of public proxies for YouTube
-PROXY_POOL = [
-    "http://8.219.97.52:80",
-    "http://47.91.65.23:3128",
-    "http://103.152.112.162:80",
-    "http://47.243.92.199:3128",
-    "http://8.219.97.52:8080",
-    "http://154.17.23.181:80",
-    "http://154.17.23.181:8080",
-    "http://47.91.65.23:80",
-    "http://103.152.112.162:8080",
-    "http://8.219.97.52:3128"
-]
-_proxy_cycle = itertools.cycle(PROXY_POOL)
-
-def _get_next_proxy():
-    # Agar config me proxies hain toh wahan se uthayega
-    if getattr(config, "PROXIES", None):
-        import random
-        return random.choice(config.PROXIES)
-    return next(_proxy_cycle)
-
-async def _yt_request(endpoint, body):
-    for _ in range(5): # 5 proxy try karega
-        proxy = _get_next_proxy()
-        try:
-            r = await client().post(
-                f"https://www.youtube.com/youtubei/v1/{endpoint}?key={INNERTUBE_KEY}&prettyPrint=false",
-                json=body, cookies=_get_cookiejar(), timeout=8.0, proxy=proxy
-            )
-            if r.status_code == 200:
-                return r.json()
-        except Exception:
-            continue
-    return None
-
-# YOUTUBE INTEGRATION (Fallback)
-# ==========================================
-import random
-import json
-from urllib.parse import quote
-
-INNERTUBE_CLIENTS = [
-    {"client": {"clientName": "ANDROID", "clientVersion": "19.09.37", "androidSdkVersion": 30, "hl": "en", "gl": "US"}},
-    {"client": {"clientName": "IOS", "clientVersion": "19.09.3", "deviceModel": "iPhone14,3", "hl": "en", "gl": "US"}},
-    {"client": {"clientName": "WEB", "clientVersion": "2.20240101.00.00", "hl": "en", "gl": "US"}}
-]
-INNERTUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
-
-
-import http.cookiejar
-
-def _get_cookiejar():
-    if not getattr(config, "COOKIES_FILE", None) or not os.path.exists(config.COOKIES_FILE):
-        return None
-    cj = http.cookiejar.MozillaCookieJar(config.COOKIES_FILE)
-    try:
-        cj.load(ignore_discard=True, ignore_expires=True)
-        return cj
-    except Exception:
-        return None
-
-def _get_proxy():
-    if getattr(config, "PROXIES", None):
-        return random.choice(config.PROXIES)
-    return None
-
-async def _yt_search(query, limit=5):
-    if not getattr(config, "YOUTUBE_ENABLED", True):
+async def _artists(q, n=4):
+    if n <= 0:
         return []
-    proxy = _get_proxy()
-    body = {"context": INNERTUBE_CLIENTS[0], "query": query, "params": "EgIQAQ%3D%3D"}
-    try:
-        r = await client().post(
-            f"https://www.youtube.com/youtubei/v1/search?key={INNERTUBE_KEY}",
-            json=body, proxy=proxy, timeout=8.0,
-            cookies=_get_cookiejar()
-        )
-        data = r.json()
-    except Exception as e:
-        return []
+    data = await _api("search/artists", {"query": q, "limit": n})
+    return [a for a in (artist(i) for i in _results(data)[:n]) if a["aid"] and a["name"]]
 
-    out = []
-    def walk(node):
-        if isinstance(node, dict):
-            if "videoRenderer" in node:
-                vr = node["videoRenderer"]
-                vid = vr.get("videoId", "")
-                if vid:
-                    title = "".join(x.get("text", "") for x in vr.get("title", {}).get("runs", []))
-                    artist = vr.get("ownerText", {}).get("runs", [{}])[0].get("text", "Unknown")
-                    dur = vr.get("lengthText", {}).get("simpleText", "")
-                    dur_sec = 0
-                    if dur:
-                        try:
-                            parts = [int(x) for x in dur.split(":")]
-                            while len(parts) < 3: parts.insert(0, 0)
-                            dur_sec = parts[0]*3600 + parts[1]*60 + parts[2]
-                        except: pass
-                    
-                    thumbs = vr.get("thumbnail", {}).get("thumbnails", [])
-                    cover = thumbs[-1]["url"] if thumbs else f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
-                    
-                    out.append({
-                        "id": f"yt:{vid}", "sid": vid, "src": "youtube", 
-                        "title": _text(title, 120), "artist": _text(artist, 80),
-                        "album": "YouTube", "dur": _dur(dur_sec), "cover": _https(cover),
-                        "aud": {}, "year": ""
-                    })
-            for v in node.values(): walk(v)
-        elif isinstance(node, list):
-            for v in node: walk(v)
-            
-    walk(data)
-    return out[:limit]
 
-async def _yt_resolve(sid):
-    if not getattr(config, "YOUTUBE_ENABLED", True):
-        return None
-    proxy = _get_proxy()
-    for c_ctx in INNERTUBE_CLIENTS:
-        body = {"context": c_ctx, "videoId": sid, "contentCheckOk": True, "racyCheckOk": True}
-        try:
-            r = await client().post(
-                f"https://www.youtube.com/youtubei/v1/player?key={INNERTUBE_KEY}&prettyPrint=false",
-                json=body, proxy=proxy, timeout=8.0,
-                cookies=_get_cookiejar()
-            )
-            data = r.json()
-            ps = data.get("playabilityStatus", {})
-            if ps.get("status") != "OK":
-                continue
-            
-            sd = data.get("streamingData", {})
-            formats = sd.get("adaptiveFormats", []) + sd.get("formats", [])
-            
-            best = None
-            best_score = -1
-            for f in formats:
-                mt = f.get("mimeType", "")
-                u = f.get("url")
-                if not u: continue
-                
-                score = 0
-                if "audio/mp4" in mt and "140" in str(f.get("itag")): score = 100
-                elif "audio/" in mt: score = 60
-                elif "video/mp4" in mt: score = 40
-                
-                if score > best_score:
-                    best_score = score
-                    best = u
-            
-            if best:
-                pub_url = f"{config.PUBLIC_ORIGIN}/api/ytstream?url={quote(best, safe='')}"
-                return {"url": pub_url, "preview": False, "cover": None}
-                
-        except Exception:
-            continue
-    return None
-
-_orig_search = search_all
-_orig_resolve = resolve
-
-async def _orig_search_all(q, songs=10, artists=4):
-    s, a = await _orig_search(q, songs, artists)
-    if len(s) < 2:
-        yt_s = await _yt_search(q, songs)
-        s.extend(yt_s)
+async def _js_search_all(q, songs=10, artists=4):
+    s, a = await asyncio.gather(_songs(q, songs), _artists(q, artists), return_exceptions=True)
+    if isinstance(s, Exception):
+        log.warning("JioSaavn songs error: %s", s)
+        s = []
+    if isinstance(a, Exception):
+        log.warning("JioSaavn artists error: %s", a)
+        a = []
     return s, a
 
-async def search(q, limit=5):
-    s, _ = await search_all(q, limit, 0)
-    return s
 
-async def _orig_resolve(track):
-    if track.get("src") == "youtube":
-        r = await _yt_resolve(track.get("sid"))
-        if r:
-            return r
-    return await _orig_resolve(track)
+async def _js_resolve(track):
+    url = pick_url(track.get("aud"))
+    if url:
+        return url
+    sid = track.get("sid")
+    if not sid:
+        return None
+    data = await _api(f"songs/{sid}")
+    items = _results(data) if isinstance(data, dict) and isinstance(data.get("data"), dict) else (data or {}).get("data") or []
+    if isinstance(items, list) and items:
+        t = song(items[0])
+        track["aud"] = t["aud"]
+        return pick_url(t["aud"])
+    return None
 
 
+def stash(track):
+    """Store a track for later lookup (e.g. from callback data). Returns the key."""
+    key = str(track.get("id") or f"{track.get('src')}:{track.get('sid')}")
+    _stash.set(key, track)
+    return key
 
 
-# ==========================================
-# UNIFIED SEARCH & RESOLVE (JioSaavn + Shruti + YT)
-# ==========================================
-from . import shruti
+def take(key):
+    """Fetch a stashed track (kept for repeat use until TTL expires)."""
+    return _stash.get(str(key))
+
+
+# --------------------------------------------------------------------------
+# Shruti integration
+# --------------------------------------------------------------------------
+
+def _first(d, *keys):
+    for k in keys:
+        v = d.get(k)
+        if v not in (None, "", [], {}):
+            return v
+    return None
+
+
+def _shruti_list(data):
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for k in ("results", "data", "songs", "items", "tracks"):
+            v = data.get(k)
+            if isinstance(v, list):
+                return v
+            if isinstance(v, dict):
+                for kk in ("results", "songs", "items", "tracks"):
+                    if isinstance(v.get(kk), list):
+                        return v[kk]
+    return []
+
+
+def _shruti_track(item):
+    if not isinstance(item, dict):
+        return None
+    sid = _first(item, "id", "sid", "song_id", "track_id", "videoId")
+    if sid is None:
+        return None
+    sid = str(sid)
+    art = _first(item, "artist", "artists", "singer", "subtitle", "channel") or ""
+    if isinstance(art, list):
+        art = ", ".join(_text(a.get("name") if isinstance(a, dict) else a) for a in art)
+    img = _first(item, "img", "image", "thumbnail", "cover", "thumb") or ""
+    if isinstance(img, list):
+        img = _img(img)
+    return {
+        "id": f"shruti:{sid}",
+        "sid": sid,
+        "src": "shruti",
+        "title": _text(_first(item, "title", "name", "song") or ""),
+        "artist": _text(art),
+        "album": _text(_first(item, "album") if isinstance(_first(item, "album"), str) else ""),
+        "dur": _dur(_first(item, "duration", "dur", "length") or 0),
+        "img": _https(img),
+        "aud": {},
+    }
+
+
+async def _shruti_search(q, n):
+    data = await shruti.api_call("search", {"query": q, "limit": n})
+    out = []
+    for item in _shruti_list(data)[:n]:
+        t = _shruti_track(item)
+        if t and t["title"]:
+            out.append(t)
+    return out
+
+
+async def _shruti_resolve(sid):
+    data = await shruti.api_call(f"download/{sid}")
+    if isinstance(data, str):
+        return _https(data) if data.startswith("http") else None
+    if isinstance(data, dict):
+        url = _first(data, "url", "download_url", "downloadUrl", "link", "stream", "stream_url", "audio")
+        if not url and isinstance(data.get("data"), (dict, str)):
+            inner = data["data"]
+            if isinstance(inner, str):
+                url = inner
+            else:
+                url = _first(inner, "url", "download_url", "downloadUrl", "link", "stream", "stream_url", "audio")
+        if isinstance(url, str) and url.startswith("http"):
+            return _https(url)
+    return None
+
+
+# --------------------------------------------------------------------------
+# YouTube (InnerTube)
+# --------------------------------------------------------------------------
+
+_yt_cookie_cache = {"v": None, "done": False}
+
+
+def _yt_cookie_header():
+    """Cookie header from config (YT_COOKIES / YOUTUBE_COOKIES): a raw string or a cookies.txt path."""
+    if _yt_cookie_cache["done"]:
+        return _yt_cookie_cache["v"]
+    _yt_cookie_cache["done"] = True
+    raw = None
+    if config is not None:
+        raw = getattr(config, "YT_COOKIES", None) or getattr(config, "YOUTUBE_COOKIES", None)
+    raw = raw or os.environ.get("YT_COOKIES")
+    if not raw:
+        return None
+    raw = str(raw).strip()
+    try:
+        if os.path.isfile(raw):
+            pairs = []
+            with open(raw, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("#HttpOnly_"):
+                        line = line[len("#HttpOnly_"):]
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) >= 7 and "youtube" in parts[0]:
+                        pairs.append(f"{parts[5]}={parts[6]}")
+            raw = "; ".join(pairs)
+    except Exception as e:
+        log.warning("YouTube cookie file read failed: %s", e)
+        raw = None
+    _yt_cookie_cache["v"] = raw or None
+    return _yt_cookie_cache["v"]
+
+
+def _yt_headers(ua=_UA):
+    h = {
+        "User-Agent": ua,
+        "Content-Type": "application/json",
+        "Origin": "https://www.youtube.com",
+        "X-YouTube-Client-Name": "1",
+    }
+    ck = _yt_cookie_header()
+    if ck:
+        h["Cookie"] = ck
+    return h
+
+
+async def _yt_post(endpoint, body, ua=_UA):
+    if not _yt_breaker.allow():
+        return None
+    try:
+        r = await _http().post(
+            f"{YT_BASE}/{endpoint}",
+            params={"key": YT_KEY, "prettyPrint": "false"},
+            json=body,
+            headers=_yt_headers(ua),
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        _yt_breaker.fail()
+        log.warning("YouTube %s failed: %s", endpoint, e)
+        return None
+    _yt_breaker.ok()
+    return data
+
+
+def _yt_seconds(txt):
+    try:
+        parts = [int(p) for p in str(txt).split(":")]
+    except Exception:
+        return 0
+    sec = 0
+    for p in parts:
+        sec = sec * 60 + p
+    return sec
+
+
+def _yt_walk(node, out):
+    """Collect every videoRenderer in the response tree."""
+    if isinstance(node, dict):
+        vr = node.get("videoRenderer")
+        if isinstance(vr, dict):
+            out.append(vr)
+        for v in node.values():
+            if isinstance(v, (dict, list)):
+                _yt_walk(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            _yt_walk(v, out)
+
+
+async def _yt_search(q, n=10):
+    body = {
+        "context": {"client": {"clientName": "WEB", "clientVersion": "2.20240726.00.00", "hl": "en", "gl": "US"}},
+        "query": q,
+        "params": "EgIQAQ%3D%3D",  # videos only
+    }
+    data = await _yt_post("search", body)
+    if not data:
+        return []
+    renderers = []
+    _yt_walk(data, renderers)
+    out, seen = [], set()
+    for vr in renderers:
+        vid = vr.get("videoId")
+        if not vid or vid in seen or not re.fullmatch(r"[\w-]{11}", vid):
+            continue
+        seen.add(vid)
+        try:
+            title = _text("".join(r.get("text", "") for r in vr["title"]["runs"]))
+        except Exception:
+            continue
+        try:
+            chan = _text(vr["ownerText"]["runs"][0]["text"])
+        except Exception:
+            chan = ""
+        try:
+            thumb = vr["thumbnail"]["thumbnails"][-1]["url"].split("?")[0]
+        except Exception:
+            thumb = f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+        dur = _yt_seconds((vr.get("lengthText") or {}).get("simpleText", ""))
+        if dur == 0:  # live streams / shorts without length
+            continue
+        out.append({
+            "id": f"yt:{vid}",
+            "sid": vid,
+            "src": "youtube",
+            "title": title,
+            "artist": chan,
+            "album": "",
+            "dur": dur,
+            "img": _https(thumb),
+            "aud": {},
+        })
+        if len(out) >= n:
+            break
+    return out
+
+
+_YT_CLIENTS = (
+    {
+        "ctx": {
+            "clientName": "ANDROID",
+            "clientVersion": "19.09.37",
+            "androidSdkVersion": 30,
+            "hl": "en",
+            "gl": "US",
+        },
+        "ua": "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
+    },
+    {
+        "ctx": {
+            "clientName": "IOS",
+            "clientVersion": "19.09.3",
+            "deviceModel": "iPhone16,2",
+            "hl": "en",
+            "gl": "US",
+        },
+        "ua": "com.google.ios.youtube/19.09.3 (iPhone16,2; U; CPU iOS 17_5 like Mac OS X)",
+    },
+)
+
+
+def _yt_best_audio(streaming):
+    fmts = streaming.get("adaptiveFormats") or []
+    audio = [
+        f for f in fmts
+        if str(f.get("mimeType", "")).startswith("audio/") and f.get("url")
+    ]
+    if audio:
+        # Prefer m4a (audio/mp4) for Telegram, then highest bitrate.
+        audio.sort(key=lambda f: (str(f.get("mimeType", "")).startswith("audio/mp4"), f.get("bitrate", 0)), reverse=True)
+        return audio[0]["url"]
+    muxed = [f for f in (streaming.get("formats") or []) if f.get("url")]
+    if muxed:
+        muxed.sort(key=lambda f: f.get("bitrate", 0), reverse=True)
+        return muxed[0]["url"]
+    return None
+
+
+async def _yt_resolve(vid):
+    if not vid or not re.fullmatch(r"[\w-]{11}", str(vid)):
+        return None
+    for c in _YT_CLIENTS:
+        body = {
+            "videoId": vid,
+            "context": {"client": c["ctx"]},
+            "contentCheckOk": True,
+            "racyCheckOk": True,
+        }
+        data = await _yt_post("player", body, ua=c["ua"])
+        if not data:
+            continue
+        status = (data.get("playabilityStatus") or {}).get("status")
+        if status not in (None, "OK"):
+            log.info("YouTube %s playability: %s", vid, status)
+            continue
+        url = _yt_best_audio(data.get("streamingData") or {})
+        if url:
+            return url
+    return None
+
+
+# --------------------------------------------------------------------------
+# Unified resolver
+# --------------------------------------------------------------------------
 
 async def search_all(q, songs=10, artists=4):
-    # 1. Shruti API (Priority)
-    try:
-        js = await shruti.api_call("search", {"query": q, "limit": songs})
-        if js and "results" in js and js["results"]:
-            out = []
-            for item in js["results"]:
-                out.append({
-                    "id": f"shruti:{item.get('id')}", "sid": str(item.get('id')), "src": "shruti",
-                    "title": _text(item.get("title", ""), 120), "artist": _text(item.get("artist", ""), 80),
-                    "album": _text(item.get("album", ""), 80), "dur": _dur(item.get("duration")),
-                    "cover": _https(item.get("cover", "")), "aud": {}, "year": ""
-                })
-            return out, []
-    except Exception:
-        pass
+    """Search all sources in SOURCE_ORDER. Returns (songs, artists)."""
+    q = (q or "").strip()
+    if not q:
+        return [], []
+    songs = max(1, int(songs or 1))
+    artists = max(0, int(artists or 0))
 
-    # 2. JioSaavn (Original base logic)
-    try:
-        s, a = await _orig_search_all(q, songs, artists)
-        if s:
-            return s, a
-    except Exception:
-        pass
-
+    for name in SOURCE_ORDER:
+        try:
+            if name == "jiosaavn":
+                s, a = await _js_search_all(q, songs, artists)
+                if s:
+                    return s, a
+            elif name == "shruti":
+                s = await _shruti_search(q, songs)
+                if s:
+                    return s, []
+            elif name == "youtube":
+                s = await _yt_search(q, songs)
+                if s:
+                    return s, []
+        except Exception as e:
+            log.warning("search source %s failed: %s", name, e)
     return [], []
+
 
 async def search(q, limit=5):
     s, _ = await search_all(q, limit, 0)
     return s
 
+
 async def resolve(track):
+    """Return a direct audio URL for a track dict, or None."""
+    if not isinstance(track, dict):
+        return None
     src = track.get("src")
-    
-    if src == "shruti":
-        try:
-            js = await shruti.api_call(f"download/{track.get('sid')}")
-            if js and "url" in js:
-                return {"url": js["url"], "preview": False, "cover": track.get("cover")}
-        except Exception:
-            pass
-            
-    # JioSaavn base logic
+    url = None
     try:
-        return await _orig_resolve(track)
-    except Exception:
-        pass
-        
+        if src == "shruti":
+            url = await _shruti_resolve(track.get("sid"))
+        elif src == "youtube":
+            url = await _yt_resolve(track.get("sid"))
+        else:
+            url = await _js_resolve(track)
+    except Exception as e:
+        log.warning("resolve via %s failed: %s", src, e)
+
+    if url:
+        return url
+
+    # Last resort: find the same song on YouTube.
+    if src != "youtube":
+        try:
+            query = " ".join(x for x in (track.get("title"), track.get("artist")) if x).strip()
+            if query:
+                for t in await _yt_search(query, 3):
+                    u = await _yt_resolve(t["sid"])
+                    if u:
+                        return u
+        except Exception as e:
+            log.warning("YouTube fallback resolve failed: %s", e)
     return None
