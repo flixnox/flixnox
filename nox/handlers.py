@@ -8,7 +8,7 @@ from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import BufferedInputFile, CallbackQuery, ChatMemberUpdated, FSInputFile, InputMediaAudio, InputMediaPhoto, Message
 
-from . import config, moviebox, music, state, ui
+from . import config, music, state, ui
 from .security import clean_text
 from .state import bot, cb_rl, cmd_rl, is_admin, penalty, rooms, store
 
@@ -337,230 +337,49 @@ async def cmd_play(m: Message, command: CommandObject):
         t["msgs"] = msgs                                  # removed when this song starts playing
 
 
+@router.message(Command("vplay"), F.chat.type.in_(GROUPS))
+async def cmd_vplay(m: Message, command: CommandObject):
+    """Add a YouTube result to the room queue (searches YouTube directly instead of JioSaavn)."""
+    if not await guard(m):
+        return
+    store.touch_group(m.chat)
+    g = store.group(m.chat.id)
+    if not g["panel"]:
+        return await m.reply("The room isn't open yet. Ask an admin to send /start first.")
+    if g["play"] == "admins" and not await admin_of(m):
+        return await m.reply("🔒 Only admins can add videos in this group.")
+    q = clean_text(command.args or "", 80)
+    if len(q) < 2:
+        return await m.reply("Usage: <code>/vplay video name</code>")
+    if not config.YOUTUBE_ENABLED:
+        return await m.reply("YouTube is switched off on this bot.")
+    results = await music.search_video(q, 1)
+    if not results:
+        return await m.reply("😕 No videos found on YouTube.")
+    room = rooms.get(m.chat.id)
+    if room is None:
+        return await m.reply("I'm very busy right now. Please try again in a minute.")
+    t = results[0]
+    t.update(by=clean_text(m.from_user.first_name if m.from_user else "Admin", 30), by_id=m.from_user.id if m.from_user else 0, src="g")
+    pos = room.add(t)
+    if pos is None:
+        return await m.reply("The queue is full right now.")
+    reply = await m.reply(ui.added_text(t, pos, t["by"]), reply_markup=ui.join_kb(m.chat.id))
+    await _autodel(m)
+    msgs = [reply.message_id] + ([] if store.group(m.chat.id)["autodel"] else [m.message_id])
+    t["instant"] = pos == "start"
+    if t.get("started"):
+        _delete_msgs(m.chat.id, msgs, 20 if t["instant"] else 0)
+    else:
+        t["msgs"] = msgs
+
+
 @router.message(Command("queue"), F.chat.type.in_(GROUPS))
 async def cmd_queue(m: Message):
     if await guard(m):
         r = await m.reply(ui.queue_text(rooms.get(m.chat.id, create=False)))
         ids = _qmsgs.setdefault(m.chat.id, [])
         ids[:] = (ids + [r.message_id, m.message_id])[-20:]
-
-
-# ---------------- MovieBox: /search + detail + episode + download (group) ----------------
-_mb_last_results = {}   # user_id -> list of normalised movie dicts (for "back to results")
-
-
-@router.message(Command("search"), F.chat.type.in_(GROUPS))
-async def cmd_movie_search(m: Message, command: CommandObject):
-    if not await guard(m):
-        return
-    q = clean_text(command.args or "", 80)
-    if len(q) < 2:
-        t = await m.reply("Usage: <code>/search movie name</code>")
-        _temp(t)
-        return
-    wait = await m.reply("🔎 Searching…")
-    results = await moviebox.search(q, limit=8)
-    try:
-        await wait.delete()
-    except TelegramAPIError:
-        pass
-    if not results:
-        t = await m.reply("😕 No movies found. Try a different title.")
-        _temp(t)
-        return
-    uid = m.from_user.id
-    # stash each result and attach token for secure callbacks
-    for r in results:
-        r["token"] = moviebox.stash(uid, r)
-    _mb_last_results[uid] = results
-    t = await m.reply(
-        ui.moviebox_results_text(q),
-        reply_markup=ui.moviebox_results_kb(results, uid),
-    )
-    _temp(t, secs=300)   # results live 5 minutes then auto-delete
-    await _autodel(m)
-
-
-@router.callback_query(F.data.startswith("mb:"))
-async def cb_movie_detail(cb: CallbackQuery):
-    """User tapped a search-result button → show full detail in group."""
-    if not await guard_cb(cb):
-        return
-    await cb.answer()
-    token = cb.data[3:]
-    uid   = cb.from_user.id
-    hit   = moviebox.take(token, uid)
-    if not hit:
-        await cb.answer("This result has expired. Search again.", show_alert=True)
-        return
-    wait = await cb.message.answer("⏳ Loading…")
-    movie = await moviebox.details(hit["id"])
-    if not movie:
-        movie = hit               # fallback: use the search-result data we already have
-    eps = []
-    mtype = (movie.get("type") or "").lower()
-    if any(k in mtype for k in ("series", "tv", "show")):
-        eps = await moviebox.episodes(hit["id"])
-    try:
-        await wait.delete()
-    except TelegramAPIError:
-        pass
-    # stash the full detail so download/episode callbacks can retrieve it safely
-    movie["token"] = moviebox.stash(uid, movie)
-    for ep in eps:
-        ep["token"] = moviebox.stash_ep(uid, ep)
-
-    await send_banner(
-        cb.message.chat.id,
-        ui.moviebox_detail_text(movie),
-        ui.moviebox_detail_kb(movie, eps),
-        spoiler=False,
-        photo=movie.get("poster"),
-    )
-
-
-@router.callback_query(F.data.startswith("mbp:"))
-async def cb_movie_ep_page(cb: CallbackQuery):
-    """Paginate episode list: mbp:{movie_id}:{page}"""
-    if not await guard_cb(cb):
-        return
-    await cb.answer()
-    parts = cb.data[4:].rsplit(":", 1)
-    if len(parts) != 2:
-        return
-    movie_id, page_str = parts
-    try:
-        page = int(page_str)
-    except ValueError:
-        return
-    uid = cb.from_user.id
-    eps   = await moviebox.episodes(movie_id)
-    movie = await moviebox.details(movie_id)
-    if not movie:
-        return
-    movie["token"] = moviebox.stash(uid, movie)
-    for ep in eps:
-        ep["token"] = moviebox.stash_ep(uid, ep)
-    try:
-        if cb.message.photo:
-            await cb.message.edit_caption(
-                caption=ui.moviebox_detail_text(movie),
-                reply_markup=ui.moviebox_detail_kb(movie, eps, page),
-            )
-        else:
-            await cb.message.edit_reply_markup(reply_markup=ui.moviebox_detail_kb(movie, eps, page))
-    except TelegramBadRequest:
-        pass
-
-
-@router.callback_query(F.data == "mbr")
-async def cb_movie_back(cb: CallbackQuery):
-    """Back to the previous results list."""
-    if not await guard_cb(cb):
-        return
-    await cb.answer()
-    uid     = cb.from_user.id
-    results = _mb_last_results.get(uid)
-    if not results:
-        try:
-            await cb.message.delete()
-        except TelegramAPIError:
-            pass
-        return
-    # re-stash so tokens are fresh
-    for r in results:
-        r["token"] = moviebox.stash(uid, r)
-    try:
-        if cb.message.photo:
-            await cb.message.delete()
-        else:
-            await cb.message.edit_text(
-                ui.moviebox_results_text(""),
-                reply_markup=ui.moviebox_results_kb(results, uid),
-            )
-    except TelegramAPIError:
-        pass
-    await cb.message.answer(
-        ui.moviebox_results_text("your recent search"),
-        reply_markup=ui.moviebox_results_kb(results, uid),
-    )
-
-
-@router.callback_query(F.data.startswith("mbd:"))
-async def cb_movie_download(cb: CallbackQuery):
-    """Download button on a plain movie → DM the user the stream link."""
-    if not await guard_cb(cb):
-        return
-    await cb.answer()
-    token = cb.data[4:]
-    uid   = cb.from_user.id
-    movie = moviebox.take(token, uid)
-    if not movie:
-        await cb.answer("Link expired. Open the detail again.", show_alert=True)
-        return
-    await _send_movie_to_pvt(cb, uid, movie)
-
-
-@router.callback_query(F.data.startswith("mbe:"))
-async def cb_episode_download(cb: CallbackQuery):
-    """Download button on an episode → DM the user."""
-    if not await guard_cb(cb):
-        return
-    await cb.answer()
-    token = cb.data[4:]
-    uid   = cb.from_user.id
-    ep    = moviebox.take_ep(token, uid)
-    if not ep:
-        await cb.answer("Link expired. Open the detail again.", show_alert=True)
-        return
-    # retrieve the parent movie title from stash via movie detail
-    movie = {"title": "Series", "type": "series"}   # fallback; detail lookup is optional
-    await _send_movie_to_pvt(cb, uid, movie, ep=ep)
-
-
-async def _send_movie_to_pvt(cb: CallbackQuery, uid: int, movie: dict, ep=None):
-    """DM the user their stream link; show a brief in-group notice."""
-    stream_url = None
-    if ep:
-        stream_url = ep.get("url") or ""
-    else:
-        streams = movie.get("streams") or []
-        if streams:
-            first = streams[0]
-            stream_url = (first.get("url") or first.get("link") or first) if isinstance(first, dict) else str(first)
-
-    caption = ui.moviebox_pvt_text(movie, ep)
-    try:
-        if stream_url:
-            await bot.send_message(
-                uid,
-                caption + f'\n\n<a href="{ui.esc(str(stream_url))}">⬇ Click here to download / stream</a>',
-                disable_web_page_preview=False,
-            )
-        else:
-            # no direct stream URL in API data — send the detail page URL instead
-            detail_url = f"{config.MOVIEBOX_BASE}/movie/{movie.get('id', '')}"
-            await bot.send_message(
-                uid,
-                caption + f'\n\n<a href="{ui.esc(detail_url)}">🎬 Open on MovieBox</a>',
-                disable_web_page_preview=False,
-            )
-        # brief notice in the group (auto-deleted)
-        name = ui.esc(cb.from_user.first_name[:24] if cb.from_user.first_name else "")
-        notice = await cb.message.answer(
-            f"📨 {name}, check your private chat — I sent the download link there!"
-        )
-        _temp(notice, secs=30)
-    except TelegramAPIError as e:
-        if "bot was blocked" in str(e).lower() or "chat not found" in str(e).lower() or "forbidden" in str(e).lower():
-            bot_link = f"https://t.me/{config.BOT_USERNAME}?start=dl"
-            notice = await cb.message.answer(
-                f"⚠️ <a href='{bot_link}'>Start me in private first</a>, then tap Download again.",
-                disable_web_page_preview=True,
-            )
-            _temp(notice, secs=60)
-        else:
-            raise
 
 
 # ---------------- invite: anyone in the room can call the rest of the group ----------------
@@ -633,46 +452,6 @@ def _make(cmd, fn, txt):
     async def _h(m: Message):
         await _ctl(m, fn, txt)
     return _h
-
-
-
-@router.message(Command("vplay"), F.chat.type.in_(GROUPS))
-async def cmd_vplay(m: Message, command: CommandObject):
-    if not await guard(m):
-        return
-    store.touch_group(m.chat)
-    g = store.group(m.chat.id)
-    if not g["panel"]:
-        return await m.reply("The room isn't open yet. Ask an admin to send /start first.")
-    if g["play"] == "admins" and not await admin_of(m):
-        return await m.reply("🔒 Only admins can add videos in this group.")
-    q = clean_text(command.args or "", 80)
-    if len(q) < 2:
-        return await m.reply("Usage: <code>/vplay video name</code>")
-    
-    # Force YouTube search for videos
-    results = await music._yt_search(q, 1)
-    if not results:
-        return await m.reply("😕 No videos found on YouTube.")
-        
-    room = rooms.get(m.chat.id)
-    if room is None:
-        return await m.reply("I'm very busy right now. Please try again in a minute.")
-        
-    t = results[0]
-    t.update(by=clean_text(m.from_user.first_name if m.from_user else "Admin", 30), by_id=m.from_user.id if m.from_user else 0, src="g")
-    
-    pos = room.add(t)
-    if pos is None:
-        return await m.reply("The queue is full right now.")
-    reply = await m.reply(ui.added_text(t, pos, t["by"]), reply_markup=ui.join_kb(m.chat.id))
-    await _autodel(m)
-    msgs = [reply.message_id] + ([] if store.group(m.chat.id)["autodel"] else [m.message_id])
-    t["instant"] = pos == "start"
-    if t.get("started"):
-        _delete_msgs(m.chat.id, msgs, 20 if t["instant"] else 0)
-    else:
-        t["msgs"] = msgs
 
 
 for _c, _f, _t in (("skip", "skip", "⏭ Skipped."), ("pause", "pause", "⏸ Paused."), ("resume", "resume", "▶ Resumed."),
@@ -887,12 +666,14 @@ async def private_search(m: Message, q: str):
     await m.answer(ui.results_text(q, items), reply_markup=ui.results_kb(items, m.from_user.id))
 
 
+@router.message(Command("play", "search"), F.chat.type == "private")
 async def cmd_play_private(m: Message, command: CommandObject):
     if await guard(m):
         store.touch_user(m.from_user)
         await private_search(m, command.args)
 
 
+@router.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
 async def text_private(m: Message):
     if await guard(m):
         store.touch_user(m.from_user)
@@ -932,7 +713,7 @@ async def _audio_source(t, url):
     key = _tkey(t)
     if key in _audio_fid:
         return _audio_fid[key], None
-    data = await _fetch(url, 45_000_000)
+    data = await music.fetch_audio(url, 45_000_000)               # YouTube links are downloaded straight from the server
     if not data:
         return url, None                                         # last resort: let Telegram fetch the link
     ext = ".mp3" if url.split("?")[0].lower().endswith(".mp3") else ".m4a"
@@ -1007,6 +788,7 @@ async def edit_audio_card(uid, mid, room, caption, markup):
     return True
 
 
+@router.callback_query(F.data.startswith("ps:"))
 async def cb_pick(cb: CallbackQuery):
     if not await guard_cb(cb):
         return
@@ -1046,207 +828,3 @@ async def cb_send_audio(cb: CallbackQuery):
     await cb.answer("🎵 Sending the song…")
     if await send_audio_card(uid, room) is None:
         return await cb.message.answer("😕 Couldn't send this song in chat. Try the Open Player button.")
-
-
-async def text_private(m: Message):
-    if await guard(m):
-        store.touch_user(m.from_user)
-        await private_search(m, m.text)
-
-async def cmd_play_private(m: Message, command: CommandObject):
-    if await guard(m):
-        store.touch_user(m.from_user)
-        await private_search(m, command.args)
-
-
-# ==========================================
-# PRIVATE CHAT (DM) AUDIO LOGIC
-# ==========================================
-import hashlib
-import httpx
-from aiogram.enums import ChatAction
-from aiogram.types import BufferedInputFile
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-
-MAX_BYTES = 49 * 1024 * 1024
-RANGE_STEP = 8 * 1024 * 1024
-RESULTS = 8
-
-_UA_WEB = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-_UA_ANDROID = "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip"
-
-def _fmt_dur(sec) -> str:
-    try:
-        sec = int(sec)
-    except Exception:
-        return ""
-    if sec <= 0:
-        return ""
-    return f"{sec // 60}:{sec % 60:02d}"
-
-def _is_yt(track: dict, url: str = "") -> bool:
-    return track.get("src") == "youtube" or "googlevideo.com" in (url or "")
-
-def _ext(ctype: str, url: str) -> str:
-    c = (ctype or "").lower()
-    if "mpeg" in c or url.split("?")[0].lower().endswith(".mp3"):
-        return "mp3"
-    if "webm" in c:
-        return "webm"
-    return "m4a"
-
-def _safe_name(s: str) -> str:
-    return re.sub(r'[\\/:*?"<>|\r\n]+', "", s).strip()[:80] or "track"
-
-async def _fetch_plain(c: httpx.AsyncClient, url: str, headers: dict):
-    async with c.stream("GET", url, headers=headers) as r:
-        r.raise_for_status()
-        ctype = r.headers.get("content-type", "")
-        clen = int(r.headers.get("content-length") or 0)
-        if clen > MAX_BYTES:
-            raise ValueError("file too large")
-        buf = bytearray()
-        async for chunk in r.aiter_bytes(64 * 1024):
-            buf += chunk
-            if len(buf) > MAX_BYTES:
-                raise ValueError("file too large")
-        return bytes(buf), ctype
-
-async def _fetch_ranged(c: httpx.AsyncClient, url: str, headers: dict):
-    buf = bytearray()
-    start = 0
-    ctype = ""
-    while True:
-        r = await c.get(url, headers={**headers, "Range": f"bytes={start}-{start + RANGE_STEP - 1}"})
-        if not ctype:
-            ctype = r.headers.get("content-type", "")
-        if r.status_code == 200:
-            if len(r.content) > MAX_BYTES:
-                raise ValueError("file too large")
-            return r.content, ctype
-        if r.status_code != 206:
-            r.raise_for_status()
-            raise RuntimeError(f"unexpected status {r.status_code}")
-
-        buf += r.content
-        if len(buf) > MAX_BYTES:
-            raise ValueError("file too large")
-
-        m = re.match(r"bytes (\d+)-(\d+)/(\d+|\*)", r.headers.get("content-range", ""))
-        if not m:
-            break
-        last = int(m.group(2))
-        total = None if m.group(3) == "*" else int(m.group(3))
-        start = last + 1
-        if total is not None and start >= total:
-            break
-        if total is None and len(r.content) < RANGE_STEP:
-            break
-    return bytes(buf), ctype
-
-async def _fetch(url: str, yt: bool = False):
-    headers = {"Accept": "*/*", "Accept-Encoding": "identity"}
-    if yt:
-        headers.update({"User-Agent": _UA_ANDROID, "Referer": "https://www.youtube.com/"})
-    else:
-        headers["User-Agent"] = _UA_WEB
-    timeout = httpx.Timeout(connect=15.0, read=60.0, write=15.0, pool=15.0)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
-        if yt:
-            return await _fetch_ranged(c, url, headers)
-        return await _fetch_plain(c, url, headers)
-
-async def _fetch_thumb(url: str):
-    if not url: return None
-    try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as c:
-            r = await c.get(url, headers={"User-Agent": _UA_WEB})
-            r.raise_for_status()
-        ctype = r.headers.get("content-type", "")
-        if "jpeg" in ctype or "jpg" in ctype:
-            if 0 < len(r.content) <= 200 * 1024:
-                return BufferedInputFile(r.content, filename="cover.jpg")
-    except Exception:
-        pass
-    return None
-
-async def send_audio_card(bot, uid: int, track: dict) -> bool:
-    title = track.get("title") or "Unknown"
-    artist = track.get("artist") or ""
-    try:
-        await bot.send_chat_action(uid, ChatAction.UPLOAD_VOICE)
-        try:
-            url = await asyncio.wait_for(music.resolve(track), 40)
-        except Exception:
-            url = None
-        if not url:
-            await bot.send_message(uid, "❌ Couldn't load that track. Try another result.")
-            return False
-
-        data, ctype = await _fetch(url, yt=_is_yt(track, url))
-        if not data:
-            raise RuntimeError("empty download")
-
-        filename = f"{_safe_name(f'{artist} - {title}' if artist else title)}.{_ext(ctype, url)}"
-        file = BufferedInputFile(data, filename=filename)
-        thumb = await _fetch_thumb(track.get("img", ""))
-
-        caption = f"🎵 <b>{html.escape(title)}</b>"
-        if artist:
-            caption += f"\n👤 {html.escape(artist)}"
-        dur = _fmt_dur(track.get("dur"))
-        if dur:
-            caption += f"\n⏱ {dur}"
-
-        await bot.send_chat_action(uid, ChatAction.UPLOAD_VOICE)
-        await bot.send_audio(
-            uid,
-            file,
-            title=title,
-            performer=artist or None,
-            duration=int(track.get("dur") or 0) or None,
-            thumbnail=thumb,
-            caption=caption,
-            parse_mode="HTML",
-        )
-        return True
-    except Exception as e:
-        log.exception(f"send_audio_card crashed: {e}")
-        await bot.send_message(uid, "❌ Something went wrong.")
-        return False
-
-async def private_search(m: Message, q: str):
-    q = clean_text(q or "", 80)
-    if len(q) < 2:
-        return await m.answer("🔎 <b>Send me a song or artist name</b>")
-    tracks = await music.search(q, RESULTS)
-    if not tracks:
-        return await m.answer("😕 No results. Try the artist name too.")
-
-    kb = InlineKeyboardBuilder()
-    for t in tracks:
-        if len(f"ps:{t.get('id', '')}".encode()) > 64:
-            t = {**t, "id": hashlib.sha1(str(t.get("id")).encode()).hexdigest()[:16]}
-        key = music.stash(t)
-        dur = _fmt_dur(t.get("dur"))
-        label = f"{t.get('title', '?')} — {t.get('artist', '')}".strip(" —")
-        if dur:
-            label += f" · {dur}"
-        kb.button(text=label[:60], callback_data=f"ps:{key}")
-    kb.adjust(1)
-
-    await m.answer(f"🔎 <b>Results for</b> “{html.escape(q[:60])}”\n\nTap a song to get it:", reply_markup=kb.as_markup(), parse_mode="HTML")
-
-@router.callback_query(F.data.startswith("ps:"))
-async def cb_pick(cb: CallbackQuery):
-    if not await guard_cb(cb): return
-    key = cb.data[3:]
-    track = music.take(key)
-    if not track:
-        return await cb.answer("This search expired. Please search again.", show_alert=True)
-    await cb.answer("⏳ Getting your song…")
-    uid = cb.from_user.id
-    room = rooms.get(uid)
-    if room is None:
-        room = rooms.get(uid)
-    await send_audio_card(bot, uid, track)

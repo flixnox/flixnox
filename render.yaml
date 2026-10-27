@@ -25,3 +25,11 @@ services:
         sync: false
       - key: MONGO_URI
         sync: false
+      - key: YOUTUBE_ENABLED
+        value: "1"
+      - key: COOKIES_B64
+        sync: false
+      - key: YOUTUBE_PROXY
+        sync: false
+      - key: SHRUTI_API_KEY
+        sync: false

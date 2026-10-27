@@ -142,3 +142,13 @@ Bot token leak ho to turant BotFather me `/revoke` karo.
 - Phones behind strict mobile NATs may not connect with STUN only. Add a TURN server in Render with `ICE_SERVERS`, for example:
   `[{"urls":["stun:stun.l.google.com:19302"]},{"urls":["turn:YOUR_TURN_HOST:3478"],"username":"USER","credential":"PASS"}]`
 - Screen share works on Telegram Desktop and Web. Telegram's mobile apps do not allow it inside Mini Apps, so the Share button explains that on phones.
+
+## YouTube fallback, `/vplay` and Shruti
+
+* Songs come from **JioSaavn first**. If JioSaavn has nothing (or can't play a song) the bot falls back to **Shruti** (only if `SHRUTI_API_KEY` is set) and then **YouTube**.
+* `/vplay name` (groups) searches YouTube directly and queues the first result.
+* YouTube audio is played through a **signed proxy** (`/api/ytstream`), because googlevideo links only work from the server's own IP.
+  **Re-deploy `worker/worker.js` after updating**: it now lets `/api/ytstream` through (the Worker adds the secret header).
+* In private chat a YouTube song is downloaded on the server and sent as a real Telegram audio file.
+* Env (all optional): `YOUTUBE_ENABLED`, `COOKIES_B64`, `YOUTUBE_PROXY`, `SHRUTI_API_URL`, `SHRUTI_API_KEY`. See `.env.example`.
+* **Never commit cookies.** Keep them only in Render's `COOKIES_B64` variable.

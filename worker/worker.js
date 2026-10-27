@@ -4,8 +4,8 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const p = url.pathname;
-    const allowed = p === "/" || p === "/health" || p === "/ws" || p.startsWith("/static/") || p.startsWith("/webhook/");
-    if (!allowed || !["GET", "HEAD", "POST"].includes(request.method)) {
+    const allowed = p === "/" || p === "/health" || p === "/ws" || p === "/api/ytstream" || p.startsWith("/static/") || p.startsWith("/webhook/");
+    if (!allowed || !["GET", "HEAD", "POST", "OPTIONS"].includes(request.method)) {
       return new Response("Not found", { status: 404 });
     }
     const origin = new URL(env.ORIGIN);

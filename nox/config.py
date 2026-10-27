@@ -1,9 +1,11 @@
 """Settings, read once from environment variables. Nothing secret is hard-coded."""
+import base64
 import hashlib
 import json
 import hmac
 import os
 import sys
+import tempfile
 from urllib.parse import urlparse
 
 
@@ -26,8 +28,14 @@ MONGO_DB = _env("MONGO_DB", "noxroom")
 SUPPORT_URL = _env("SUPPORT_URL")
 # Music source: JioSaavn API. The default works out of the box, so no env variable is needed on Render.
 JIOSAAVN_BASE   = _env("JIOSAAVN_BASE",  "https://jiosaavn-api-ruddy-phi.vercel.app/api").rstrip("/")
-MOVIEBOX_BASE   = _env("MOVIEBOX_BASE", "https://curiousapis.name.ng/moviebox").rstrip("/")
 LYRICS_BASE = _env("LYRICS_BASE", "https://api.lyrics.ovh/v1").rstrip("/")
+# --- YouTube fallback (search + audio) -----------------------------------------------------------------
+YOUTUBE_ENABLED = _env("YOUTUBE_ENABLED", "1") == "1"
+YT_INNERTUBE_KEY = _env("YT_INNERTUBE_KEY", "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8")   # public web-client key, not a secret
+YOUTUBE_PROXY = _env("YOUTUBE_PROXY")             # optional http(s)://user:pass@host:port. Used for YouTube lookups AND the stream proxy
+# --- Shruti API (optional second source; needs a key) --------------------------------------------------
+SHRUTI_API_URL = _env("SHRUTI_API_URL", "https://api.shrutibots.in").rstrip("/")
+SHRUTI_API_KEY = _env("SHRUTI_API_KEY")
 AUDIO_KBPS = int(_env("AUDIO_KBPS", "160"))                      # 96 / 160 / 320 (160 starts fastest on mobile data)
 MAX_QUEUE = int(_env("MAX_QUEUE", "500"))                        # invisible safety cap, not a user limit
 
@@ -73,33 +81,13 @@ def _ice():
 
 ICE = _ice()
 
-# --- YouTube & Proxy Settings ---
-YOUTUBE_ENABLED = _env("YOUTUBE_ENABLED", "1") == "1"
-_raw_proxies = _env("YOUTUBE_PROXIES", "")
-PROXIES = []
-if _raw_proxies:
-    if "," in _raw_proxies:
-        PROXIES = [p.strip() for p in _raw_proxies.split(",") if p.strip()]
-    else:
-        PROXIES = [p.strip() for p in _raw_proxies.split("\n") if p.strip()]
 
-
-# --- Cookies Support (B64) ---
-import base64
-import os
-COOKIES_B64 = _env("COOKIES_B64", "")
-COOKIES_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cookies.txt")
-
-if COOKIES_B64 and not os.path.exists(COOKIES_FILE):
+# --- YouTube cookies: put the cookies.txt (Netscape format) in base64 into COOKIES_B64 on Render. Never commit the file. ---
+COOKIES_FILE = os.path.join(tempfile.gettempdir(), "nox_yt_cookies.txt")
+_b64 = _env("COOKIES_B64")
+if _b64:
     try:
-        with open(COOKIES_FILE, "wb") as f:
-            f.write(base64.b64decode(COOKIES_B64))
+        with open(COOKIES_FILE, "wb") as _f:
+            _f.write(base64.b64decode(_b64))
     except Exception:
-        pass
-
-# --- MovieBox Proxy ---
-MOVIEBOX_PROXY = _env("MOVIEBOX_PROXY", "http://1.179.172.45:31225") # Fallback free proxy
-
-# --- Shruti API ---
-SHRUTI_API_URL = _env("SHRUTI_API_URL", "https://api.shrutibots.in").rstrip("/")
-SHRUTI_API_KEY = _env("SHRUTI_API_KEY", "")
+        print("[config] COOKIES_B64 is not valid base64, YouTube cookies ignored", file=sys.stderr)

@@ -6,5 +6,8 @@ __pycache__/
 api_report.txt
 live_test.py
 cookies.txt
+cookies_b64.txt
+*cookies*
 proxies.txt
 alive_proxies.txt
+shruti_report.txt
