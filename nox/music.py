@@ -236,7 +236,7 @@ async def _artists(q, limit):
     return [a for a in (artist(r) for r in rows) if a][:limit]
 
 
-async def search_all(q, songs=10, artists=4):
+async def _orig_search_all(q, songs=10, artists=4):
     """One round trip for the Mini App: songs and artists fetched in parallel."""
     q = clean_text(q, 80)
     if len(q) < 2:
@@ -273,7 +273,7 @@ def take(token, user_id):
 
 
 # ---------- playing ----------
-async def resolve(track):
+async def _orig_resolve(track):
     """Audio link for a track. Search results already carry it, so this is instant in the normal case."""
     url = pick_url(track)
     if url:
@@ -509,7 +509,7 @@ async def _yt_resolve(sid):
 _orig_search = search_all
 _orig_resolve = resolve
 
-async def search_all(q, songs=10, artists=4):
+async def _orig_search_all(q, songs=10, artists=4):
     s, a = await _orig_search(q, songs, artists)
     if len(s) < 2:
         yt_s = await _yt_search(q, songs)
@@ -520,7 +520,7 @@ async def search(q, limit=5):
     s, _ = await search_all(q, limit, 0)
     return s
 
-async def resolve(track):
+async def _orig_resolve(track):
     if track.get("src") == "youtube":
         r = await _yt_resolve(track.get("sid"))
         if r:
@@ -603,7 +603,7 @@ async def shruti_resolve(track):
 _orig_search_all = search_all
 _orig_resolve = resolve
 
-async def search_all(q, songs=10, artists=4):
+async def _orig_search_all(q, songs=10, artists=4):
     # Shruti API se try karo pehle
     shruti_res = await shruti_search(q, songs)
     if shruti_res:
@@ -616,9 +616,73 @@ async def search(q, limit=5):
     s, _ = await search_all(q, limit, 0)
     return s
 
-async def resolve(track):
+async def _orig_resolve(track):
     if track.get("src") == "shruti":
         res = await shruti_resolve(track)
         if res:
             return res
+    return await _orig_resolve(track)
+
+
+# ==========================================
+# EXTRACTORS FALLBACK (JioSaavn -> Shruti -> YouTube)
+# ==========================================
+from . import shruti
+
+async def search_all(q, songs=10, artists=4):
+    # 1. Try Shruti API
+    try:
+        js = await shruti.api_call("search", {"query": q, "limit": songs})
+        if js and "results" in js and js["results"]:
+            out = []
+            for item in js["results"]:
+                out.append({
+                    "id": f"shruti:{item.get('id')}", "sid": str(item.get('id')), "src": "shruti",
+                    "title": _text(item.get("title", ""), 120), "artist": _text(item.get("artist", ""), 80),
+                    "album": _text(item.get("album", ""), 80), "dur": _dur(item.get("duration")),
+                    "cover": _https(item.get("cover", "")), "aud": {}, "year": ""
+                })
+            return out, []
+    except Exception:
+        pass
+
+    # 2. Try JioSaavn (Original)
+    s, a = await _orig_search_all(q, songs, artists)
+    if s:
+        return s, a
+
+    # 3. Try YouTube
+    try:
+        yt_s = await _yt_search(q, songs)
+        if yt_s:
+            return yt_s, []
+    except Exception:
+        pass
+
+    return [], []
+
+async def search(q, limit=5):
+    s, _ = await search_all(q, limit, 0)
+    return s
+
+async def resolve(track):
+    src = track.get("src")
+    
+    if src == "shruti":
+        try:
+            js = await shruti.api_call(f"download/{track.get('sid')}")
+            if js and "url" in js:
+                return {"url": js["url"], "preview": False, "cover": track.get("cover")}
+        except Exception:
+            pass
+            
+    if src == "youtube":
+        try:
+            r = await _yt_resolve(track.get("sid"))
+            if r:
+                return r
+        except Exception:
+            pass
+
+    # Fallback to original resolver
     return await _orig_resolve(track)
