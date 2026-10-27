@@ -528,109 +528,15 @@ async def _orig_resolve(track):
     return await _orig_resolve(track)
 
 
-# ==========================================
-# YOUTUBE VIDEO RESOLVER (For /vplay)
-# ==========================================
-async def _yt_resolve_video(sid):
-    if not getattr(config, "YOUTUBE_ENABLED", True):
-        return None
-    
-    body = {"context": INNERTUBE_CLIENTS[0], "videoId": sid, "contentCheckOk": True, "racyCheckOk": True}
-    data = await _yt_request("player", body)
-    if not data or data.get("playabilityStatus", {}).get("status") != "OK":
-        return None
-            
-        sd = data.get("streamingData", {})
-        formats = sd.get("formats", []) # Muxed formats (audio+video)
-        if not formats:
-            formats = sd.get("adaptiveFormats", [])
-            
-        best = None
-        best_score = -1
-        for f in formats:
-            u = f.get("url")
-            if not u: continue
-            mt = f.get("mimeType", "")
-            score = 0
-            if "video/mp4" in mt: score = 100 + int(f.get("height", 0) or 0)
-            elif "video/" in mt: score = 50
-            
-            if score > best_score:
-                best_score = score
-                best = u
-                
-        if best:
-            pub_url = f"{config.PUBLIC_ORIGIN}/api/ytstream?url={quote(best, safe='')}"
-            return {"url": pub_url, "preview": False, "cover": None}
-    except Exception:
-        pass
-    return None
-
-async def resolve_video(track):
-    if track.get("src") == "youtube":
-        return await _yt_resolve_video(track.get("sid"))
-    return await _orig_resolve(track)
 
 
 # ==========================================
-# SHRUTI API INTEGRATION
-# ==========================================
-from . import shruti
-
-async def shruti_search(query, limit=5):
-    # Shruti API ka search endpoint (assuming /search)
-    js = await shruti.api_call("search", {"query": query, "limit": limit})
-    if not js or "results" not in js:
-        return []
-    
-    out = []
-    for item in js.get("results", []):
-        out.append({
-            "id": f"shruti:{item.get('id')}", "sid": str(item.get('id')), "src": "shruti",
-            "title": _text(item.get("title", ""), 120), "artist": _text(item.get("artist", ""), 80),
-            "album": _text(item.get("album", ""), 80), "dur": _dur(item.get("duration")),
-            "cover": _https(item.get("cover", "")), "aud": {}, "year": ""
-        })
-    return out[:limit]
-
-async def shruti_resolve(track):
-    sid = track.get("sid")
-    js = await shruti.api_call(f"download/{sid}")
-    if js and "url" in js:
-        return {"url": js["url"], "preview": False, "cover": track.get("cover")}
-    return None
-
-_orig_search_all = search_all
-_orig_resolve = resolve
-
-async def _orig_search_all(q, songs=10, artists=4):
-    # Shruti API se try karo pehle
-    shruti_res = await shruti_search(q, songs)
-    if shruti_res:
-        return shruti_res, []
-    
-    # Agar nahi mila, toh JioSaavn/YouTube fallback
-    return await _orig_search_all(q, songs, artists)
-
-async def search(q, limit=5):
-    s, _ = await search_all(q, limit, 0)
-    return s
-
-async def _orig_resolve(track):
-    if track.get("src") == "shruti":
-        res = await shruti_resolve(track)
-        if res:
-            return res
-    return await _orig_resolve(track)
-
-
-# ==========================================
-# EXTRACTORS FALLBACK (JioSaavn -> Shruti -> YouTube)
+# UNIFIED SEARCH & RESOLVE (JioSaavn + Shruti + YT)
 # ==========================================
 from . import shruti
 
 async def search_all(q, songs=10, artists=4):
-    # 1. Try Shruti API
+    # 1. Shruti API (Priority)
     try:
         js = await shruti.api_call("search", {"query": q, "limit": songs})
         if js and "results" in js and js["results"]:
@@ -646,16 +552,11 @@ async def search_all(q, songs=10, artists=4):
     except Exception:
         pass
 
-    # 2. Try JioSaavn (Original)
-    s, a = await _orig_search_all(q, songs, artists)
-    if s:
-        return s, a
-
-    # 3. Try YouTube
+    # 2. JioSaavn (Original base logic)
     try:
-        yt_s = await _yt_search(q, songs)
-        if yt_s:
-            return yt_s, []
+        s, a = await _orig_search_all(q, songs, artists)
+        if s:
+            return s, a
     except Exception:
         pass
 
@@ -676,13 +577,10 @@ async def resolve(track):
         except Exception:
             pass
             
-    if src == "youtube":
-        try:
-            r = await _yt_resolve(track.get("sid"))
-            if r:
-                return r
-        except Exception:
-            pass
-
-    # Fallback to original resolver
-    return await _orig_resolve(track)
+    # JioSaavn base logic
+    try:
+        return await _orig_resolve(track)
+    except Exception:
+        pass
+        
+    return None
