@@ -96,3 +96,6 @@ if COOKIES_B64 and not os.path.exists(COOKIES_FILE):
             f.write(base64.b64decode(COOKIES_B64))
     except Exception:
         pass
+
+# --- MovieBox Proxy ---
+MOVIEBOX_PROXY = _env("MOVIEBOX_PROXY", "http://1.179.172.45:31225") # Fallback free proxy
