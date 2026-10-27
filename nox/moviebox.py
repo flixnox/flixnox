@@ -1,13 +1,14 @@
-"""MovieBox API (api.moviebox.pro - No Auth Needed)."""
+"""MovieBox API (H5 App - Real Endpoints)."""
 import time
 import secrets
 import httpx
 from .security import clean_text
 
-BASE = "https://api.moviebox.pro/api/v1"
+BASE = "https://h5.aoneroom.com"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-    "Accept": "application/json"
+    "Accept": "application/json",
+    "X-Client-Info": '{"timezone":"Asia/Kolkata","os":"web","client":"h5","version":"3.0.0"}'
 }
 
 _stash = {}
@@ -48,50 +49,48 @@ async def _get(path, params=None):
 
 async def search(q, limit=8):
     if not q: return []
-    js = await _get("/search", {"query": q, "page": 1})
-    if not js or "results" not in js: return []
+    # H5 search API
+    js = await _get("/wefeed-h5-bff/app/get-search", {"keyword": q, "page": 1, "perPage": limit})
+    if not js or "data" not in js: return []
     
     out = []
-    for item in js.get("results", [])[:limit]:
-        poster = item.get("poster", "")
-        title = item.get("title", "")
+    for item in js.get("data", {}).get("items", []):
         out.append({
-            "id": str(item.get("id", "")),
-            "title": clean_text(title),
+            "id": str(item.get("id")),
+            "title": clean_text(item.get("title", "")),
             "year": str(item.get("year", "")),
-            "type": item.get("type", "movie"),
-            "poster": poster,
+            "type": item.get("type", ""),
+            "poster": item.get("cover", {}).get("url", ""),
             "rating": str(item.get("rating", "")),
             "desc": clean_text(item.get("description", ""))
         })
     return out
 
 async def details(movie_id):
-    js = await _get(f"/movie/{movie_id}")
-    if not js or "id" not in js: return None
+    js = await _get("/wefeed-h5-bff/app/get-post-detail", {"id": movie_id, "type": "1"})
+    if not js or "data" not in js: return None
+    item = js["data"]
     
-    out = {
-        "id": str(js.get("id")),
-        "title": clean_text(js.get("title", "")),
-        "year": str(js.get("year", "")),
-        "type": js.get("type", "movie"),
-        "poster": js.get("poster", ""),
-        "desc": clean_text(js.get("description", "")),
-        "rating": str(js.get("rating", "")),
-        "streams": js.get("streams", []),
+    return {
+        "id": str(item.get("id")),
+        "title": clean_text(item.get("title", "")),
+        "year": str(item.get("year", "")),
+        "type": item.get("type", ""),
+        "poster": item.get("cover", {}).get("url", ""),
+        "desc": clean_text(item.get("description", "")),
+        "rating": str(item.get("rating", "")),
+        "streams": [],
         "token": ""
     }
-    return out
 
 async def episodes(movie_id):
-    js = await _get(f"/series/{movie_id}/episodes")
-    if not js or "episodes" not in js: return []
-    
+    js = await _get("/wefeed-h5-bff/app/get-episode", {"id": movie_id})
+    if not js or "data" not in js: return []
     out = []
-    for ep in js["episodes"]:
+    for ep in js["data"].get("episodes", []):
         out.append({
-            "id": str(ep.get("id", "")),
-            "title": f"Ep {ep.get('episode', '')} - {ep.get('title', '')}",
-            "url": ep.get("url", ""),
+            "id": str(ep.get("id")),
+            "title": ep.get("title", ""),
+            "url": "",
         })
     return out
