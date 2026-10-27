@@ -887,14 +887,12 @@ async def private_search(m: Message, q: str):
     await m.answer(ui.results_text(q, items), reply_markup=ui.results_kb(items, m.from_user.id))
 
 
-@router.message(Command("play", "search"), F.chat.type == "private")
 async def cmd_play_private(m: Message, command: CommandObject):
     if await guard(m):
         store.touch_user(m.from_user)
         await private_search(m, command.args)
 
 
-@router.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
 async def text_private(m: Message):
     if await guard(m):
         store.touch_user(m.from_user)
@@ -1049,3 +1047,16 @@ async def cb_send_audio(cb: CallbackQuery):
     await cb.answer("🎵 Sending the song…")
     if await send_audio_card(uid, room) is None:
         return await cb.message.answer("😕 Couldn't send this song in chat. Try the Open Player button.")
+
+
+@router.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
+async def text_private(m: Message):
+    if await guard(m):
+        store.touch_user(m.from_user)
+        await private_search(m, m.text)
+
+@router.message(Command("play", "search"), F.chat.type == "private")
+async def cmd_play_private(m: Message, command: CommandObject):
+    if await guard(m):
+        store.touch_user(m.from_user)
+        await private_search(m, command.args)
