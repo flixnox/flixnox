@@ -148,6 +148,9 @@ class Room:
         try:
             r = await asyncio.wait_for(music.resolve(t), 50)
             if r:
+                # Ensure YouTube links don't break
+                if isinstance(r, str) and "googlevideo.com" in r:
+                    r = f"https://flixnox-k1g6.onrender.com/api/ytstream?url={quote(r, safe='')}"
                 t["_r"] = (r, time.time())
             else:
                 t["_rf"] = time.time()
