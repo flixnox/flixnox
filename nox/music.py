@@ -508,11 +508,11 @@ def _yt_cookie_header():
     return _ck["v"]
 
 
-async def _yt_post(endpoint, body, ua=_UA):
+async def _yt_post(endpoint, body, ua=_UA, cookies=True):
     if not BREAKER.ok("yt"):
         return None
     headers = {"User-Agent": ua, "Content-Type": "application/json", "Origin": "https://www.youtube.com"}
-    ck = _yt_cookie_header()
+    ck = _yt_cookie_header() if cookies else None
     if ck:
         headers["Cookie"] = ck
     try:
@@ -596,10 +596,13 @@ async def _yt_search(q, n=10):
 
 
 _YT_CLIENTS = (
+    ({"clientName": "ANDROID_VR", "clientVersion": "1.60.19", "deviceMake": "Oculus", "deviceModel": "Quest 3", "androidSdkVersion": 32,
+      "osName": "Android", "osVersion": "12L", "hl": "en", "gl": "US"},
+     "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip", False),
     ({"clientName": "ANDROID", "clientVersion": "19.09.37", "androidSdkVersion": 30, "hl": "en", "gl": "US"},
-     "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip"),
+     "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip", True),
     ({"clientName": "IOS", "clientVersion": "19.09.3", "deviceModel": "iPhone16,2", "hl": "en", "gl": "US"},
-     "com.google.ios.youtube/19.09.3 (iPhone16,2; U; CPU iOS 17_5 like Mac OS X)"),
+     "com.google.ios.youtube/19.09.3 (iPhone16,2; U; CPU iOS 17_5 like Mac OS X)", True),
 )
 
 
@@ -638,16 +641,19 @@ async def _yt_urls(vid):
     cached = _YT.get(vid)
     if cached:
         return cached
-    for ctx, ua in _YT_CLIENTS:
-        js = await _yt_post("player", {"videoId": vid, "context": {"client": ctx}, "contentCheckOk": True, "racyCheckOk": True}, ua=ua)
+    for ctx, ua, use_cookies in _YT_CLIENTS:
+        js = await _yt_post("player", {"videoId": vid, "context": {"client": ctx}, "contentCheckOk": True, "racyCheckOk": True},
+                            ua=ua, cookies=use_cookies)
         if not js:
             continue
-        status = (js.get("playabilityStatus") or {}).get("status")
-        if status not in (None, "OK"):
-            log.info("YouTube %s not playable: %s", vid, status)
+        ps = js.get("playabilityStatus") or {}
+        if ps.get("status") not in (None, "OK"):
+            log.warning("YouTube %s via %s: %s - %s", vid, ctx["clientName"], ps.get("status"), str(ps.get("reason"))[:120])
             continue
         sd = js.get("streamingData") or {}
         url, pic = _yt_best_audio(sd), _yt_best_video(sd)
+        if not url:
+            log.warning("YouTube %s via %s: no direct audio url (formats need a signature)", vid, ctx["clientName"])
         if url and stream.allowed(url):
             out = {"a": url, "v": pic if pic and stream.allowed(pic) else None}
             _YT.put(vid, out)
