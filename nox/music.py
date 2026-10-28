@@ -518,7 +518,7 @@ async def _yt_post(endpoint, body, ua=_UA, cookies=True):
     try:
         async with _sem:
             r = await yt_client().post(f"{_YT_BASE}/{endpoint}", params={"key": config.YT_INNERTUBE_KEY, "prettyPrint": "false"},
-                                       json=body, headers=headers, timeout=10.0)
+                                       json=body, headers=headers, timeout=7.0)
         if r.status_code != 200 or len(r.content) > 3_000_000:
             raise ValueError(r.status_code)
         js = r.json()
@@ -658,7 +658,10 @@ async def _yt_urls(vid):
             out = {"a": url, "v": pic if pic and stream.allowed(pic) else None}
             _YT.put(vid, out)
             return out
-    return None
+    out = await _ytdlp_urls(vid)             # last resort: yt-dlp follows YouTube changes much faster than hand-made clients
+    if out:
+        _YT.put(vid, out)
+    return out
 
 
 async def _resolve_yt(track):
@@ -692,7 +695,7 @@ async def _resolve_yt_by_search(track):
 
 # ---------- downloads for chat (DM) ----------
 async def _yt_download(url, limit):
-    headers = {"User-Agent": stream.ANDROID_UA, "Accept": "*/*", "Accept-Encoding": "identity", "Referer": "https://www.youtube.com/"}
+    headers = {"User-Agent": stream.ua_for(url), "Accept": "*/*", "Accept-Encoding": "identity", "Referer": "https://www.youtube.com/"}
     buf, start, step = bytearray(), 0, 4 * 1024 * 1024
     while True:
         r = await yt_client().get(url, headers={**headers, "Range": f"bytes={start}-{start + step - 1}"}, timeout=40.0)
@@ -724,3 +727,113 @@ async def fetch_audio(url, limit=45_000_000):
     except Exception as e:
         log.debug("audio fetch failed: %s", e)
     return None
+
+
+# ---------- last resort: yt-dlp ----------
+def _ytdlp_ok():
+    try:
+        import yt_dlp  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _ytdlp_extract(vid):
+    import yt_dlp
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True,
+            "socket_timeout": 10, "retries": 1, "extractor_retries": 1, "cachedir": False}
+    if os.path.exists(config.COOKIES_FILE):
+        opts["cookiefile"] = config.COOKIES_FILE
+    if config.YOUTUBE_PROXY:
+        opts["proxy"] = config.YOUTUBE_PROXY
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        return ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
+
+
+def _ytdlp_pick(info):
+    def has(c):
+        return c not in (None, "", "none")
+    fm = [f for f in (info.get("formats") or []) if isinstance(f.get("url"), str)
+          and f.get("protocol") in ("https", "http") and stream.allowed(f["url"])]
+    aud = [f for f in fm if has(f.get("acodec")) and not has(f.get("vcodec"))]
+    if aud:
+        aud.sort(key=lambda f: (f.get("ext") == "m4a", -abs(int(f.get("abr") or 0) - config.AUDIO_KBPS)), reverse=True)
+        a = aud[0]["url"]
+    else:
+        mux = [f for f in fm if has(f.get("acodec")) and has(f.get("vcodec"))]
+        a = mux[-1]["url"] if mux else None
+    if not a:
+        return None
+    vids = [f for f in fm if has(f.get("vcodec")) and not has(f.get("acodec")) and str(f.get("vcodec")).startswith("avc1")
+            and 0 < int(f.get("height") or 0) <= config.VIDEO_MAX_HEIGHT]
+    vids.sort(key=lambda f: (int(f.get("height") or 0), -int(f.get("tbr") or 0)), reverse=True)
+    return {"a": a, "v": vids[0]["url"] if vids else None}
+
+
+async def _ytdlp_urls(vid):
+    if not config.YTDLP_ENABLED or not _ytdlp_ok():
+        return None
+    try:
+        info = await asyncio.wait_for(asyncio.to_thread(_ytdlp_extract, vid), 25)
+        return _ytdlp_pick(info or {})
+    except Exception as e:
+        log.warning("yt-dlp %s failed: %s", vid, str(e)[:200])
+        return None
+
+
+async def yt_diagnose(vid="dQw4w9WgXcQ"):
+    """Owner command /ytcheck: shows exactly where YouTube playback breaks."""
+    BREAKER.good("yt")
+    out = [f"cookies: {'yes' if _yt_cookie_header() else 'no'} | proxy: {'yes' if config.YOUTUBE_PROXY else 'no'} | "
+           f"yt-dlp: {'yes' if _ytdlp_ok() and config.YTDLP_ENABLED else 'no'}"]
+    out.append("search: " + ("ok" if await _yt_search("arijit singh", 1) else "FAILED"))
+    first = None
+    for ctx, ua, use_cookies in _YT_CLIENTS:
+        name = ctx["clientName"]
+        headers = {"User-Agent": ua, "Content-Type": "application/json", "Origin": "https://www.youtube.com"}
+        ck = _yt_cookie_header() if use_cookies else None
+        if ck:
+            headers["Cookie"] = ck
+        t0 = time.monotonic()
+        try:
+            r = await yt_client().post(f"{_YT_BASE}/player", params={"key": config.YT_INNERTUBE_KEY, "prettyPrint": "false"},
+                                       json={"videoId": vid, "context": {"client": ctx}, "contentCheckOk": True, "racyCheckOk": True},
+                                       headers=headers, timeout=10.0)
+            ms = int((time.monotonic() - t0) * 1000)
+            if r.status_code != 200:
+                out.append(f"{name}: HTTP {r.status_code} ({ms} ms)")
+                continue
+            js = r.json()
+        except Exception as e:
+            out.append(f"{name}: {type(e).__name__} ({int((time.monotonic() - t0) * 1000)} ms)")
+            continue
+        ps = js.get("playabilityStatus") or {}
+        a = _yt_best_audio(js.get("streamingData") or {})
+        line = f"{name}: {ps.get('status')} | audio {'ok' if a else 'none'} | {ms} ms"
+        if ps.get("status") != "OK":
+            line += " | " + str(ps.get("reason"))[:70]
+        out.append(line)
+        first = first or a
+    if config.YTDLP_ENABLED and _ytdlp_ok():
+        t0 = time.monotonic()
+        try:
+            picked = _ytdlp_pick(await asyncio.wait_for(asyncio.to_thread(_ytdlp_extract, vid), 40) or {})
+            out.append(f"yt-dlp: {'ok' if picked else 'no usable format'} ({int((time.monotonic() - t0) * 1000)} ms)")
+            first = first or (picked or {}).get("a")
+        except Exception as e:
+            out.append("yt-dlp: " + str(e)[:110])
+    if first:
+        try:
+            r = await yt_client().get(first, headers={"User-Agent": stream.ua_for(first), "Accept": "*/*", "Accept-Encoding": "identity",
+                                                       "Referer": "https://www.youtube.com/", "Range": "bytes=0-1023"}, timeout=15.0)
+            out.append(f"stream fetch: HTTP {r.status_code}, {len(r.content)} bytes")
+        except Exception as e:
+            out.append("stream fetch: " + type(e).__name__)
+    else:
+        out.append("stream fetch: skipped (no url)")
+    try:
+        r = await client().get(f"{config.PUBLIC_ORIGIN}/api/ytstream", params={"url": "https://a.googlevideo.com/x"}, timeout=10.0)
+        out.append("worker route: " + ("OK" if r.status_code == 403 else f"NOT WORKING (HTTP {r.status_code}) - redeploy worker.js"))
+    except Exception as e:
+        out.append("worker route: " + type(e).__name__)
+    return "\n".join(out)

@@ -32,6 +32,7 @@ LYRICS_BASE = _env("LYRICS_BASE", "https://api.lyrics.ovh/v1").rstrip("/")
 # --- YouTube fallback (search + audio) -----------------------------------------------------------------
 YOUTUBE_ENABLED = _env("YOUTUBE_ENABLED", "1") == "1"
 YT_INNERTUBE_KEY = _env("YT_INNERTUBE_KEY", "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8")   # public web-client key, not a secret
+YTDLP_ENABLED = _env("YTDLP_ENABLED", "1") == "1"                # yt-dlp as the last YouTube resolver
 VIDEO_MAX_HEIGHT = int(_env("VIDEO_MAX_HEIGHT", "360") or 360)   # /vplay picture quality (240 / 360 / 480). Higher = more bandwidth on your host
 YOUTUBE_PROXY = _env("YOUTUBE_PROXY")             # optional http(s)://user:pass@host:port. Used for YouTube lookups AND the stream proxy
 # --- Shruti API (optional second source; needs a key) --------------------------------------------------

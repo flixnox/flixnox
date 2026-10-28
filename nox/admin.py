@@ -1,5 +1,6 @@
 """Owner-only admin panel (private chat): stats, API health, ban/unban, maintenance, broadcast."""
 import asyncio
+import html
 import time
 import uuid
 
@@ -228,3 +229,16 @@ async def bc_stop(cb: CallbackQuery):
     if doc and doc["status"] == "running":
         doc["status"] = "cancelled"
     await cb.answer("Stopping…")
+
+
+@router.message(Command("ytcheck"))
+async def ytcheck(m: Message):
+    wait = await m.answer("🔎 Checking YouTube…")
+    try:
+        txt = await asyncio.wait_for(music.yt_diagnose(), 100)
+    except Exception as e:
+        txt = "check crashed: " + type(e).__name__
+    try:
+        await wait.edit_text("<pre>" + html.escape(txt) + "</pre>")
+    except TelegramAPIError:
+        await m.answer(html.escape(txt)[:3500])

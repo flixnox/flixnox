@@ -25,6 +25,21 @@ PATH = "/api/ytstream"
 CHUNK = 64 * 1024
 LINK_TTL = 6 * 3600
 ANDROID_UA = "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip"
+BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+UA_BY_CLIENT = {
+    "ANDROID_VR": "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+    "ANDROID": ANDROID_UA,
+    "IOS": "com.google.ios.youtube/19.09.3 (iPhone16,2; U; CPU iOS 17_5 like Mac OS X)",
+}
+
+
+def ua_for(url):
+    """googlevideo links carry c=<client>; YouTube likes the same client's User-Agent back."""
+    try:
+        c = (parse_qs(urlsplit(url).query).get("c") or [""])[0].upper()
+    except ValueError:
+        c = ""
+    return UA_BY_CLIENT.get(c) or (BROWSER_UA if c else ANDROID_UA)
 ALLOWED_HOSTS = ("googlevideo.com", "youtube.com", "ytimg.com")
 MAX_REDIRECTS = 4
 CORS = {
@@ -98,7 +113,7 @@ async def ytstream_options():
 async def ytstream(request: Request, url: str, exp: int = 0, sig: str = ""):
     if exp < time.time() or not hmac.compare_digest(sig, _sig(url, exp)) or not allowed(url):
         raise HTTPException(403, "Link expired or invalid")
-    headers = {"User-Agent": ANDROID_UA, "Accept": "*/*", "Accept-Encoding": "identity", "Referer": "https://www.youtube.com/"}
+    headers = {"User-Agent": ua_for(url), "Accept": "*/*", "Accept-Encoding": "identity", "Referer": "https://www.youtube.com/"}
     if request.headers.get("range"):
         headers["Range"] = request.headers["range"]
 
