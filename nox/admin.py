@@ -233,12 +233,18 @@ async def bc_stop(cb: CallbackQuery):
 
 @router.message(Command("ytcheck"))
 async def ytcheck(m: Message):
-    wait = await m.answer("🔎 Checking YouTube…")
+    wait = await m.answer("🔎 Checking YouTube… (results appear line by line, takes up to a minute)")
+    last = {"t": ""}
+
+    async def report(text):
+        if text != last["t"]:
+            last["t"] = text
+            await wait.edit_text("<pre>" + html.escape(text) + "</pre>")
+
     try:
-        txt = await asyncio.wait_for(music.yt_diagnose(), 100)
+        await asyncio.wait_for(music.yt_diagnose(report), 90)
     except Exception as e:
-        txt = "check crashed: " + type(e).__name__
-    try:
-        await wait.edit_text("<pre>" + html.escape(txt) + "</pre>")
-    except TelegramAPIError:
-        await m.answer(html.escape(txt)[:3500])
+        try:
+            await report(last["t"] + "\n\n(stopped: " + type(e).__name__ + ")")
+        except Exception:
+            pass

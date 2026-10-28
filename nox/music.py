@@ -781,12 +781,43 @@ async def _ytdlp_urls(vid):
         return None
 
 
-async def yt_diagnose(vid="dQw4w9WgXcQ"):
-    """Owner command /ytcheck: shows exactly where YouTube playback breaks."""
+async def yt_diagnose(report=None, vid="dQw4w9WgXcQ"):
+    """Owner command /ytcheck. Reports line by line (through `report`), so one hanging step never hides the others."""
     BREAKER.good("yt")
-    out = [f"cookies: {'yes' if _yt_cookie_header() else 'no'} | proxy: {'yes' if config.YOUTUBE_PROXY else 'no'} | "
-           f"yt-dlp: {'yes' if _ytdlp_ok() and config.YTDLP_ENABLED else 'no'}"]
-    out.append("search: " + ("ok" if await _yt_search("arijit singh", 1) else "FAILED"))
+    out = []
+
+    async def say(line):
+        out.append(line)
+        if report:
+            try:
+                await report("\n".join(out))
+            except Exception:
+                pass
+
+    async def timed(coro, secs):
+        t0 = time.monotonic()
+        try:
+            return await asyncio.wait_for(coro, secs), int((time.monotonic() - t0) * 1000), None
+        except asyncio.TimeoutError:
+            return None, int((time.monotonic() - t0) * 1000), f"timeout >{secs}s"
+        except Exception as e:
+            return None, int((time.monotonic() - t0) * 1000), type(e).__name__ + (": " + str(e)[:50] if str(e) else "")
+
+    await say(f"cookies: {'yes' if _yt_cookie_header() else 'no'} | proxy: {'yes' if config.YOUTUBE_PROXY else 'no'} | "
+              f"yt-dlp: {'yes' if _ytdlp_ok() and config.YTDLP_ENABLED else 'no'}")
+
+    r, ms, err = await timed(client().get(f"{config.PUBLIC_ORIGIN}/api/ytstream", params={"url": "https://a.googlevideo.com/x"}, timeout=6.0), 8)
+    if err:
+        await say(f"worker route: {err} ({ms} ms)")
+    else:
+        await say("worker route: " + ("OK" if r.status_code == 403 else f"NOT WORKING (HTTP {r.status_code}) - redeploy worker.js"))
+
+    r, ms, err = await timed(yt_client().get("https://www.youtube.com/generate_204", timeout=6.0), 8)
+    await say(f"youtube.com reachable: {err or 'HTTP ' + str(r.status_code)} ({ms} ms)")
+
+    s, ms, err = await timed(_yt_search("arijit singh", 1), 10)
+    await say(f"search: {err or ('ok' if s else 'FAILED')} ({ms} ms)")
+
     first = None
     for ctx, ua, use_cookies in _YT_CLIENTS:
         name = ctx["clientName"]
@@ -794,46 +825,39 @@ async def yt_diagnose(vid="dQw4w9WgXcQ"):
         ck = _yt_cookie_header() if use_cookies else None
         if ck:
             headers["Cookie"] = ck
-        t0 = time.monotonic()
+        r, ms, err = await timed(yt_client().post(
+            f"{_YT_BASE}/player", params={"key": config.YT_INNERTUBE_KEY, "prettyPrint": "false"}, headers=headers, timeout=6.0,
+            json={"videoId": vid, "context": {"client": ctx}, "contentCheckOk": True, "racyCheckOk": True}), 8)
+        if err:
+            await say(f"{name}: {err} ({ms} ms)")
+            continue
+        if r.status_code != 200:
+            await say(f"{name}: HTTP {r.status_code} ({ms} ms)")
+            continue
         try:
-            r = await yt_client().post(f"{_YT_BASE}/player", params={"key": config.YT_INNERTUBE_KEY, "prettyPrint": "false"},
-                                       json={"videoId": vid, "context": {"client": ctx}, "contentCheckOk": True, "racyCheckOk": True},
-                                       headers=headers, timeout=10.0)
-            ms = int((time.monotonic() - t0) * 1000)
-            if r.status_code != 200:
-                out.append(f"{name}: HTTP {r.status_code} ({ms} ms)")
-                continue
             js = r.json()
-        except Exception as e:
-            out.append(f"{name}: {type(e).__name__} ({int((time.monotonic() - t0) * 1000)} ms)")
+        except ValueError:
+            await say(f"{name}: bad JSON ({ms} ms)")
             continue
         ps = js.get("playabilityStatus") or {}
         a = _yt_best_audio(js.get("streamingData") or {})
         line = f"{name}: {ps.get('status')} | audio {'ok' if a else 'none'} | {ms} ms"
         if ps.get("status") != "OK":
             line += " | " + str(ps.get("reason"))[:70]
-        out.append(line)
+        await say(line)
         first = first or a
+
     if config.YTDLP_ENABLED and _ytdlp_ok():
-        t0 = time.monotonic()
-        try:
-            picked = _ytdlp_pick(await asyncio.wait_for(asyncio.to_thread(_ytdlp_extract, vid), 40) or {})
-            out.append(f"yt-dlp: {'ok' if picked else 'no usable format'} ({int((time.monotonic() - t0) * 1000)} ms)")
-            first = first or (picked or {}).get("a")
-        except Exception as e:
-            out.append("yt-dlp: " + str(e)[:110])
+        info, ms, err = await timed(asyncio.to_thread(_ytdlp_extract, vid), 25)
+        picked = None if err else _ytdlp_pick(info or {})
+        await say(f"yt-dlp: {err or ('ok' if picked else 'no usable format')} ({ms} ms)")
+        first = first or (picked or {}).get("a")
+
     if first:
-        try:
-            r = await yt_client().get(first, headers={"User-Agent": stream.ua_for(first), "Accept": "*/*", "Accept-Encoding": "identity",
-                                                       "Referer": "https://www.youtube.com/", "Range": "bytes=0-1023"}, timeout=15.0)
-            out.append(f"stream fetch: HTTP {r.status_code}, {len(r.content)} bytes")
-        except Exception as e:
-            out.append("stream fetch: " + type(e).__name__)
+        r, ms, err = await timed(yt_client().get(first, headers={"User-Agent": stream.ua_for(first), "Accept": "*/*", "Accept-Encoding": "identity",
+                                                                 "Referer": "https://www.youtube.com/", "Range": "bytes=0-1023"}, timeout=8.0), 10)
+        await say(f"stream fetch: {err or 'HTTP ' + str(r.status_code) + ', ' + str(len(r.content)) + ' bytes'} ({ms} ms)")
     else:
-        out.append("stream fetch: skipped (no url)")
-    try:
-        r = await client().get(f"{config.PUBLIC_ORIGIN}/api/ytstream", params={"url": "https://a.googlevideo.com/x"}, timeout=10.0)
-        out.append("worker route: " + ("OK" if r.status_code == 403 else f"NOT WORKING (HTTP {r.status_code}) - redeploy worker.js"))
-    except Exception as e:
-        out.append("worker route: " + type(e).__name__)
+        await say("stream fetch: skipped (no url)")
+    await say("done")
     return "\n".join(out)
