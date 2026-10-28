@@ -71,6 +71,40 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(len(music._shruti_rows({"data": {"results": [{"id": 1}, "junk"]}})), 1)
 
 
+class VideoTests(unittest.TestCase):
+    STREAMING = {"adaptiveFormats": [
+        {"mimeType": 'video/mp4; codecs="avc1.4d401f"', "height": 720, "bitrate": 2000000, "url": "https://a.googlevideo.com/v720"},
+        {"mimeType": 'video/mp4; codecs="avc1.4d401e"', "height": 360, "bitrate": 600000, "url": "https://a.googlevideo.com/v360"},
+        {"mimeType": 'video/mp4; codecs="avc1.4d4015"', "height": 240, "bitrate": 300000, "url": "https://a.googlevideo.com/v240"},
+        {"mimeType": 'video/webm; codecs="vp9"', "height": 360, "bitrate": 500000, "url": "https://a.googlevideo.com/vp9"},
+        {"mimeType": 'audio/mp4; codecs="mp4a.40.2"', "bitrate": 130000, "url": "https://a.googlevideo.com/m4a"}],
+        "formats": [{"mimeType": 'video/mp4; codecs="avc1, mp4a"', "height": 360, "bitrate": 700000, "url": "https://a.googlevideo.com/muxed"}]}
+
+    def test_picks_h264_up_to_the_height_cap(self):
+        self.assertEqual(music._yt_best_video(self.STREAMING), "https://a.googlevideo.com/v360")
+
+    def test_falls_back_to_muxed_when_no_adaptive_video_fits(self):
+        sd = {"adaptiveFormats": [self.STREAMING["adaptiveFormats"][0]], "formats": self.STREAMING["formats"]}
+        self.assertEqual(music._yt_best_video(sd), "https://a.googlevideo.com/muxed")
+
+    def test_resolve_adds_picture_stream_only_for_video_tracks(self):
+        async def urls(vid):
+            return {"a": GV, "v": GV + "&v=1"}
+
+        async def audio(vid):
+            return GV
+        saved = music._yt_urls, music._yt_resolve
+        music._yt_urls, music._yt_resolve = urls, audio
+        try:
+            plain = run(music.resolve({"id": "yt:abcdefghijk", "sid": "abcdefghijk", "prov": "yt"}))
+            vplay = run(music.resolve({"id": "yt:abcdefghijk", "sid": "abcdefghijk", "prov": "yt", "video": True}))
+        finally:
+            music._yt_urls, music._yt_resolve = saved
+        self.assertIsNone(plain["vurl"])
+        self.assertIn("/api/ytstream?url=", vplay["vurl"])
+        self.assertNotEqual(vplay["url"], vplay["vurl"])
+
+
 class FlowTests(unittest.TestCase):
     def setUp(self):
         self._saved = {k: getattr(music, k) for k in ("_songs", "_artists", "_yt_search", "_yt_resolve", "_resolve_saavn")}

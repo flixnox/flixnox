@@ -406,7 +406,10 @@ async def _fallback_songs(q, limit):
 async def search_video(q, limit=1):
     """/vplay: search YouTube directly (skips JioSaavn)."""
     q = clean_text(q, 80)
-    return await _yt_search(q, limit) if len(q) >= 2 and config.YOUTUBE_ENABLED else []
+    rows = await _yt_search(q, limit) if len(q) >= 2 and config.YOUTUBE_ENABLED else []
+    for r in rows:
+        r["video"] = True
+    return rows
 
 
 # ---------- Shruti ----------
@@ -611,8 +614,25 @@ def _yt_best_audio(streaming):
     return max(muxed, key=lambda f: int(f.get("bitrate") or 0))["url"] if muxed else None
 
 
+def _yt_best_video(streaming):
+    """Picture-only stream (muted in the Mini App; the audio element stays the clock). Prefers h264 mp4 up to VIDEO_MAX_HEIGHT."""
+    cap = config.VIDEO_MAX_HEIGHT
+    vids = [f for f in (streaming.get("adaptiveFormats") or []) if str(f.get("mimeType", "")).startswith("video/mp4")
+            and "avc1" in str(f.get("mimeType", "")) and isinstance(f.get("url"), str) and 0 < int(f.get("height") or 0) <= cap]
+    if vids:
+        vids.sort(key=lambda f: (int(f.get("height") or 0), -int(f.get("bitrate") or 0)), reverse=True)
+        return vids[0]["url"]
+    muxed = [f for f in (streaming.get("formats") or []) if isinstance(f.get("url"), str) and int(f.get("height") or 0) <= cap]
+    return max(muxed, key=lambda f: int(f.get("height") or 0))["url"] if muxed else None
+
+
 async def _yt_resolve(vid):
     """Direct googlevideo audio URL for a video id (only usable from this server's IP, hence the proxy)."""
+    return ((await _yt_urls(vid)) or {}).get("a")
+
+
+async def _yt_urls(vid):
+    """{"a": audio url, "v": picture url or None} from ONE player request, cached."""
     if not isinstance(vid, str) or not _VID.match(vid):
         return None
     cached = _YT.get(vid)
@@ -626,16 +646,24 @@ async def _yt_resolve(vid):
         if status not in (None, "OK"):
             log.info("YouTube %s not playable: %s", vid, status)
             continue
-        url = _yt_best_audio(js.get("streamingData") or {})
+        sd = js.get("streamingData") or {}
+        url, pic = _yt_best_audio(sd), _yt_best_video(sd)
         if url and stream.allowed(url):
-            _YT.put(vid, url)
-            return url
+            out = {"a": url, "v": pic if pic and stream.allowed(pic) else None}
+            _YT.put(vid, out)
+            return out
     return None
 
 
 async def _resolve_yt(track):
-    url = await _yt_resolve(track.get("sid"))
-    return {"url": stream.proxy_url(url), "preview": False, "cover": track.get("cover")} if url else None
+    if track.get("video"):                       # /vplay: also hand the Mini App a picture stream
+        urls = await _yt_urls(track.get("sid")) or {}
+        a, v = urls.get("a"), urls.get("v")
+    else:
+        a, v = await _yt_resolve(track.get("sid")), None
+    if not a:
+        return None
+    return {"url": stream.proxy_url(a), "preview": False, "cover": track.get("cover"), "vurl": stream.proxy_url(v) if v else None}
 
 
 async def _resolve_yt_by_search(track):

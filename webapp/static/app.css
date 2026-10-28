@@ -217,3 +217,10 @@ html.slim .amb,html.slim .orb{display:none!important}
 .solo .tab[data-tab="people"], .solo .pill, .solo #inv, .solo #invbtn{display:none}
 .solo .nav{grid-template-columns:repeat(3,1fr)}
 .solo .slider{width:calc((100% - 12px)/3)}
+
+/* ---- /vplay: picture layer (muted, follows the audio clock) ---- */
+.art video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000;border-radius:inherit;z-index:1}
+.art video[hidden]{display:none}
+.stage.video{width:min(92vw,520px);aspect-ratio:16/9}
+.stage.video .art{border-radius:22px}
+.art.vid .note,.art.vid .gloss,.art.vid .eq{display:none}

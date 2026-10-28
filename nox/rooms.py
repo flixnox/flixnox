@@ -17,6 +17,7 @@ class Room:
     def __init__(self, chat_id, mgr):
         self.chat_id, self.mgr = chat_id, mgr
         self.queue, self.cur, self.url, self.preview = [], None, None, False
+        self.vurl = None                        # picture-only stream for /vplay videos (the Mini App plays it muted, in sync with the audio)
         self.pos0, self.t0 = 0.0, time.time()
         self.paused = self.auto_paused = self.loop = self.autoplay = False
         self.played = deque(maxlen=60)
@@ -45,7 +46,7 @@ class Room:
             nx.append(u)
         return {"t": "state", "nxt": nx[0] if nx else None, "nx": nx, "auto": self.autoplay, "seq": self.seq,
                 "track": pub(self.cur) if self.cur else None,
-                "url": self.url if self.cur else None, "preview": self.preview,
+                "url": self.url if self.cur else None, "vurl": self.vurl if self.cur else None, "preview": self.preview,
                 "pos": round(self.position(), 2), "paused": self.paused, "st": time.time(),
                 "loop": self.loop, "queue": [pub(x) for x in self.queue[:50]], "qn": len(self.queue),
                 "n": len(self.clients)}
@@ -181,7 +182,7 @@ class Room:
                     r = None
             t.pop("_r", None)
             if r:
-                self.cur, self.url, self.preview = t, r["url"], r["preview"]
+                self.cur, self.url, self.preview, self.vurl = t, r["url"], r["preview"], r.get("vurl")
                 self.played.append(t.get("id"))
                 self.empty_plays = 0 if self.clients else self.empty_plays + 1
                 self.pos0, self.t0, self.paused, self.auto_paused = 0.0, time.time(), False, False
@@ -195,7 +196,7 @@ class Room:
                 self._prefetch()
                 return True
             self.mgr.on_fail(self, t)
-        self.cur, self.url = None, None
+        self.cur, self.url, self.vurl = None, None, None
         self.seq += 1
         return False
 

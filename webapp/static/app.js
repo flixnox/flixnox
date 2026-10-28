@@ -10,6 +10,7 @@
 
   let ws = null, st = null, admin = false, roomLink = "", meId = 0, ice = [{ urls: ["stun:stun.l.google.com:19302"] }], off = 0, bestRtt = 1e9, localOff = false;
   let closing = false, dead = false, backoff = 1000, hb = null, tab = "now", searchTimer = null;
+  let vid = null, vidUrl = "", vidBad = "";                                           // /vplay picture layer (see syncVideo)
   let reqId = 0, lastReq = null, badSent = -1, nxtUrl = "", lyrOpen = false, qsig = "", lastCover = "", hinted = false;
   const cache = new Map(), pending = [];
 
@@ -526,6 +527,7 @@
     ["auto", "q-auto"].forEach((id) => $(id).classList.toggle("on", !!(st && st.auto)));
     $("adm").hidden = !admin;
     media();
+    syncVideo();
   }
   function renderMini() {
     const t = st && st.track, show = !!t && tab !== "now";
@@ -569,7 +571,23 @@
       }
     } catch (e) {}
   }
-  setInterval(() => { syncAudio(); watchStuck(); warmNext(); draw(); mediaPos(); }, 500);
+  // ---------- video layer (/vplay): the audio element stays the master clock, the picture just follows it (muted) ----------
+  function syncVideo() {
+    if (!vid) { vid = $("vid"); if (!vid) return; vid.addEventListener("error", () => { vidBad = vidUrl; syncVideo(); }); }   // picture failed: the music just keeps playing
+    const on = !!(st && st.track && st.vurl && vidBad !== st.vurl);
+    $("stage").classList.toggle("video", on); $("art").classList.toggle("vid", on);
+    if (!on) { if (vidUrl) { vid.pause(); vid.removeAttribute("src"); vid.load(); vidUrl = ""; } vid.hidden = true; return; }
+    vid.hidden = false;
+    if (vidUrl !== st.vurl) { vidUrl = st.vurl; vid.src = st.vurl; vid.load(); }
+    if (st.paused || localOff || document.hidden || au.paused) { if (!vid.paused) vid.pause(); }
+    else if (vid.paused && vid.readyState >= 2) { const p = vid.play(); if (p && p.catch) p.catch(() => {}); }
+    if (vid.readyState >= 2 && !vid.seeking) {
+      const target = au.readyState >= 2 && !au.paused ? au.currentTime : want();
+      if (Math.abs(vid.currentTime - target) > 0.4) { try { vid.currentTime = target; } catch (e) {} }
+    }
+  }
+
+  setInterval(() => { syncAudio(); watchStuck(); warmNext(); draw(); mediaPos(); syncVideo(); }, 500);
   // light mode while the app is in the background: far less GPU/memory, so Android is less likely to kill the page ("Aw, Snap!")
   const root = document.documentElement;
   try { if ((navigator.deviceMemory && navigator.deviceMemory <= 4) || (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4)) root.classList.add("slim"); } catch (e) {}
